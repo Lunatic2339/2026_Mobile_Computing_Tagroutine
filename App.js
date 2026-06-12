@@ -487,11 +487,18 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') { setLocError('위치 권한이 없습니다.'); setFetching(false); return; }
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      // Balanced 우선 시도 → 실패 시 마지막으로 알려진 위치로 폴백
+      let loc = null;
+      try {
+        loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      } catch (_) {
+        loc = await Location.getLastKnownPositionAsync();
+      }
+      if (!loc) { setLocError('위치를 가져올 수 없습니다. 실외에서 GPS를 켜고 다시 시도하세요.'); setFetching(false); return; }
       setLocLat(loc.coords.latitude);
       setLocLng(loc.coords.longitude);
     } catch (e) {
-      setLocError('위치를 가져올 수 없습니다. GPS를 확인해주세요.');
+      setLocError('위치 권한을 확인해주세요.');
     } finally { setFetching(false); }
   };
 
