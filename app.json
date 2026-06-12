@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -15,7 +15,9 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NFCReaderUsageDescription": "NFC 태그를 스캔하여 약 복용 확인 및 루틴을 자동 실행합니다."
+        "NFCReaderUsageDescription": "NFC 태그를 스캔하여 약 복용 확인 및 루틴을 자동 실행합니다.",
+        "NSLocationWhenInUseUsageDescription": "시니어 모드에서 등록된 장소 진입 시 자동으로 루틴을 실행합니다.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "시니어 모드에서 등록된 장소 진입 시 자동으로 루틴을 실행합니다."
       }
     },
     "android": {
@@ -24,7 +26,11 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "permissions": ["android.permission.NFC"]
+      "permissions": [
+        "android.permission.NFC",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
