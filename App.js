@@ -1109,7 +1109,7 @@ const RoutineModal = ({ visible, editRoutine, tags, gpsLocations, theme, onSave,
             <View style={[rom.stepLine, { backgroundColor: theme.line }]} />
           </View>
 
-          <ScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }}>
+          <ScrollView keyboardShouldPersistTaps="handled">
             {step === 'config' ? (
               <View style={rom.body}>
                 {/* 루틴 이름 */}
