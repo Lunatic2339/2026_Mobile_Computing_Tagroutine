@@ -84,6 +84,21 @@ const GPS_ACTIONS = [
   { key: 'custom',  label: '기록만 남기기', emoji: '📝' },
 ];
 
+const ROUTINE_STORAGE_KEY = '@tagroutine:routines_v1';
+
+const ROUTINE_TRIGGER_TYPES = [
+  { key: 'nfc',  label: 'NFC 태그 스캔',  emoji: '🏷️', desc: '등록된 태그를 스캔했을 때' },
+  { key: 'gps',  label: 'GPS 장소 진입',  emoji: '📍', desc: '등록된 장소에 들어갔을 때' },
+  { key: 'time', label: '특정 시간',      emoji: '⏰', desc: '매일 지정한 시각에 자동 실행' },
+];
+
+const ROUTINE_ACTION_TYPES = [
+  { key: 'log',         label: '타임라인 기록',    emoji: '📋', hasMessage: true,  hasContext: false },
+  { key: 'alert',       label: '시니어 알림 표시', emoji: '🔔', hasMessage: true,  hasContext: false },
+  { key: 'set_context', label: '컨텍스트 변경',    emoji: '🎭', hasMessage: false, hasContext: true  },
+  { key: 'medication',  label: '복약 완료 처리',   emoji: '💊', hasMessage: false, hasContext: false },
+];
+
 // ============================================================================
 // 🎨 디자인 토큰
 // ============================================================================
@@ -706,7 +721,7 @@ const cms = StyleSheet.create({
 // ============================================================================
 const SeniorScreen = ({
   theme, now, meals, medicationDone, context, safeZoneAlert,
-  nfcSupported, activeGpsZone,
+  nfcSupported, activeGpsZone, routineAlert,
   onTriggerWorship, onTriggerSafeZone, onRollback,
 }) => {
   const [playing, setPlaying] = useState(false);
@@ -732,6 +747,13 @@ const SeniorScreen = ({
         <View style={[ss.contextBadge, { backgroundColor: theme.accentDim, borderColor: theme.accent }]}>
           <Church color={theme.accent} size={28} strokeWidth={2.5} />
           <Text style={[ss.contextText, { color: theme.accent }]}>🤫 예배 중 · 자동 음소거</Text>
+        </View>
+      )}
+      {/* 커스텀 루틴 알림 배너 */}
+      {routineAlert && (
+        <View style={[ss.contextBadge, { backgroundColor: 'rgba(0,194,146,0.15)', borderColor: theme.accent }]}>
+          <Play color={theme.accent} size={24} strokeWidth={2.5} />
+          <Text style={[ss.contextText, { color: theme.accent, fontSize: 20 }]}>{routineAlert}</Text>
         </View>
       )}
       {/* GPS 현재 장소 표시 */}
@@ -834,6 +856,7 @@ const FamilyScreen = ({
   tags, onAddTag, onEditTag, onDeleteTag,
   gpsLocations, onAddGps, onEditGps, onDeleteGps,
   pendingTags, onRegisterPending,
+  routines, onAddRoutine, onEditRoutine, onDeleteRoutine, onToggleRoutine,
 }) => {
   const circleScale = 0.35 + ((radius - 100) / 900) * 0.65;
   const mapSize = SCREEN_W - 80;
@@ -932,6 +955,13 @@ const FamilyScreen = ({
 
       {/* ⑤ GPS 장소 관리 */}
       <LocationManagerSection gpsLocations={gpsLocations} theme={theme} onAdd={onAddGps} onEdit={onEditGps} onDelete={onDeleteGps} />
+
+      {/* ⑥ 커스텀 루틴 관리 */}
+      <RoutineManagerSection
+        routines={routines} theme={theme}
+        onAdd={onAddRoutine} onEdit={onEditRoutine}
+        onDelete={onDeleteRoutine} onToggle={onToggleRoutine}
+      />
     </ScrollView>
   );
 };
@@ -969,6 +999,378 @@ const fs = StyleSheet.create({
   nanoText: { fontSize: 11, fontWeight: '800' },
   radiusScale: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 2 },
   scaleText: { fontSize: 11, fontWeight: '600' },
+});
+
+// ============================================================================
+// 🔁 RoutineModal — 커스텀 루틴 생성 / 수정
+// ============================================================================
+const RoutineModal = ({ visible, editRoutine, tags, gpsLocations, theme, onSave, onCancel }) => {
+  const [step, setStep]               = useState('config'); // 'config' | 'actions'
+  const [name, setName]               = useState('');
+  const [triggerType, setTriggerType] = useState('nfc');
+  const [selectedTagId, setSelectedTagId]   = useState('');
+  const [selectedLocId, setSelectedLocId]   = useState('');
+  const [triggerHour, setTriggerHour]       = useState(9);
+  const [triggerMinute, setTriggerMinute]   = useState(0);
+  const [actions, setActions]         = useState([]);
+
+  useEffect(() => {
+    if (!visible) return;
+    if (editRoutine) {
+      setStep('config');
+      setName(editRoutine.name);
+      setTriggerType(editRoutine.trigger.type);
+      setSelectedTagId(editRoutine.trigger.tagId || '');
+      setSelectedLocId(editRoutine.trigger.locationId || '');
+      setTriggerHour(editRoutine.trigger.hour ?? 9);
+      setTriggerMinute(editRoutine.trigger.minute ?? 0);
+      setActions(editRoutine.actions || []);
+    } else {
+      setStep('config');
+      setName(''); setTriggerType('nfc');
+      setSelectedTagId(tags[0]?.id || '');
+      setSelectedLocId(gpsLocations[0]?.id || '');
+      setTriggerHour(9); setTriggerMinute(0); setActions([]);
+    }
+  }, [visible]);
+
+  const canGoNext = name.trim() &&
+    (triggerType === 'nfc'  ? selectedTagId :
+     triggerType === 'gps'  ? selectedLocId : true);
+
+  const addAction = (typeKey) => {
+    const def = ROUTINE_ACTION_TYPES.find(a => a.key === typeKey);
+    setActions(prev => [...prev, {
+      id: `act-${Date.now()}`,
+      type: typeKey,
+      message: def.hasMessage ? '' : undefined,
+      context: def.hasContext ? 'worship' : undefined,
+    }]);
+  };
+
+  const updateAction = (id, patch) =>
+    setActions(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a));
+
+  const removeAction = (id) =>
+    setActions(prev => prev.filter(a => a.id !== id));
+
+  const handleSave = () => {
+    if (!name.trim() || actions.length === 0) return;
+    onSave({
+      ...(editRoutine ? { id: editRoutine.id } : {}),
+      name: name.trim(),
+      enabled: editRoutine?.enabled ?? true,
+      trigger: {
+        type: triggerType,
+        ...(triggerType === 'nfc'  ? { tagId: selectedTagId } : {}),
+        ...(triggerType === 'gps'  ? { locationId: selectedLocId } : {}),
+        ...(triggerType === 'time' ? { hour: triggerHour, minute: triggerMinute } : {}),
+      },
+      actions,
+    });
+  };
+
+  const triggerSummary = () => {
+    if (triggerType === 'nfc') {
+      const t = tags.find(t => t.id === selectedTagId);
+      return t ? `🏷️ ${t.name}` : '🏷️ 태그 미선택';
+    }
+    if (triggerType === 'gps') {
+      const l = gpsLocations.find(l => l.id === selectedLocId);
+      return l ? `📍 ${l.name}` : '📍 장소 미선택';
+    }
+    return `⏰ 매일 ${String(triggerHour).padStart(2,'0')}:${String(triggerMinute).padStart(2,'0')}`;
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+      <View style={rom.backdrop}>
+        <View style={[rom.sheet, { backgroundColor: theme.surface }]}>
+          <View style={rom.header}>
+            <Text style={[rom.title, { color: theme.text }]}>
+              {step === 'config' ? (editRoutine ? '루틴 수정' : '루틴 만들기') : '동작 추가'}
+            </Text>
+            <TouchableOpacity onPress={onCancel} style={[rom.closeBtn, { backgroundColor: theme.surfaceAlt }]}>
+              <X color={theme.subText} size={20} strokeWidth={2.5} />
+            </TouchableOpacity>
+          </View>
+
+          {/* 단계 인디케이터 */}
+          <View style={rom.stepRow}>
+            {['조건 설정', '동작 추가'].map((label, i) => (
+              <View key={i} style={rom.stepItem}>
+                <View style={[rom.stepDot,
+                  { backgroundColor: (step === 'config' ? 0 : 1) >= i ? theme.accent : theme.line }]} />
+                <Text style={[rom.stepLabel, { color: (step === 'config' ? 0 : 1) >= i ? theme.accent : theme.subText }]}>
+                  {label}
+                </Text>
+              </View>
+            ))}
+            <View style={[rom.stepLine, { backgroundColor: theme.line }]} />
+          </View>
+
+          <ScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }}>
+            {step === 'config' ? (
+              <View style={rom.body}>
+                {/* 루틴 이름 */}
+                <Text style={[rom.fieldLabel, { color: theme.subText }]}>루틴 이름</Text>
+                <TextInput
+                  style={[rom.input, { backgroundColor: theme.surfaceAlt, color: theme.text, borderColor: theme.line }]}
+                  value={name} onChangeText={setName}
+                  placeholder="예: 교회 도착 알림" placeholderTextColor={theme.subText}
+                  autoFocus={!editRoutine}
+                />
+
+                {/* 트리거 타입 선택 */}
+                <Text style={[rom.fieldLabel, { color: theme.subText }]}>실행 조건 (IF)</Text>
+                {ROUTINE_TRIGGER_TYPES.map(t => (
+                  <TouchableOpacity key={t.key}
+                    style={[rom.optionRow, { borderColor: triggerType === t.key ? theme.accent : theme.line, backgroundColor: triggerType === t.key ? theme.accentDim : 'transparent' }]}
+                    onPress={() => setTriggerType(t.key)} activeOpacity={0.8}>
+                    <Text style={rom.optionEmoji}>{t.emoji}</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[rom.optionLabel, { color: triggerType === t.key ? theme.accent : theme.text }]}>{t.label}</Text>
+                      <Text style={[rom.optionDesc, { color: theme.subText }]}>{t.desc}</Text>
+                    </View>
+                    {triggerType === t.key && <CheckCircle2 color={theme.accent} size={18} strokeWidth={2.5} />}
+                  </TouchableOpacity>
+                ))}
+
+                {/* 트리거 세부 설정 */}
+                {triggerType === 'nfc' && (
+                  <>
+                    <Text style={[rom.fieldLabel, { color: theme.subText }]}>어떤 태그?</Text>
+                    {tags.length === 0
+                      ? <Text style={[rom.emptyHint, { color: theme.subText }]}>먼저 NFC 태그를 등록해주세요.</Text>
+                      : tags.map(t => (
+                        <TouchableOpacity key={t.id}
+                          style={[rom.optionRow, { borderColor: selectedTagId === t.id ? theme.accent : theme.line, backgroundColor: selectedTagId === t.id ? theme.accentDim : 'transparent' }]}
+                          onPress={() => setSelectedTagId(t.id)} activeOpacity={0.8}>
+                          <Tag color={selectedTagId === t.id ? theme.accent : theme.subText} size={18} strokeWidth={2.5} />
+                          <Text style={[rom.optionLabel, { flex: 1, color: selectedTagId === t.id ? theme.accent : theme.text }]}>{t.name}</Text>
+                          {selectedTagId === t.id && <CheckCircle2 color={theme.accent} size={18} strokeWidth={2.5} />}
+                        </TouchableOpacity>
+                      ))
+                    }
+                  </>
+                )}
+                {triggerType === 'gps' && (
+                  <>
+                    <Text style={[rom.fieldLabel, { color: theme.subText }]}>어떤 장소?</Text>
+                    {gpsLocations.length === 0
+                      ? <Text style={[rom.emptyHint, { color: theme.subText }]}>먼저 GPS 장소를 등록해주세요.</Text>
+                      : gpsLocations.map(l => (
+                        <TouchableOpacity key={l.id}
+                          style={[rom.optionRow, { borderColor: selectedLocId === l.id ? theme.accent : theme.line, backgroundColor: selectedLocId === l.id ? theme.accentDim : 'transparent' }]}
+                          onPress={() => setSelectedLocId(l.id)} activeOpacity={0.8}>
+                          <MapPin color={selectedLocId === l.id ? theme.accent : theme.subText} size={18} strokeWidth={2.5} />
+                          <Text style={[rom.optionLabel, { flex: 1, color: selectedLocId === l.id ? theme.accent : theme.text }]}>{l.name}</Text>
+                          {selectedLocId === l.id && <CheckCircle2 color={theme.accent} size={18} strokeWidth={2.5} />}
+                        </TouchableOpacity>
+                      ))
+                    }
+                  </>
+                )}
+                {triggerType === 'time' && (
+                  <>
+                    <Text style={[rom.fieldLabel, { color: theme.subText }]}>몇 시?</Text>
+                    <View style={[rom.timeDisplay, { backgroundColor: theme.surfaceAlt }]}>
+                      <Text style={[rom.timeText, { color: theme.accent }]}>
+                        {String(triggerHour).padStart(2,'0')}:{String(triggerMinute).padStart(2,'0')}
+                      </Text>
+                    </View>
+                    <Text style={[rom.sliderCaption, { color: theme.subText }]}>시 (0 ~ 23)</Text>
+                    <CustomSlider min={0} max={23} step={1} value={triggerHour} onChange={setTriggerHour} theme={theme} />
+                    <Text style={[rom.sliderCaption, { color: theme.subText }]}>분 (0 ~ 55, 5분 단위)</Text>
+                    <CustomSlider min={0} max={55} step={5} value={triggerMinute} onChange={setTriggerMinute} theme={theme} />
+                  </>
+                )}
+
+                <TouchableOpacity
+                  style={[rom.nextBtn, { backgroundColor: canGoNext ? theme.accent : theme.line }]}
+                  onPress={() => setStep('actions')} disabled={!canGoNext} activeOpacity={0.85}>
+                  <Text style={[rom.nextBtnText, { color: canGoNext ? theme.onAccent : theme.subText }]}>다음 →</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={rom.body}>
+                {/* 조건 요약 */}
+                <View style={[rom.summaryBox, { backgroundColor: theme.accentDim, borderColor: theme.accent }]}>
+                  <Text style={[rom.summaryLabel, { color: theme.subText }]}>IF 조건</Text>
+                  <Text style={[rom.summaryText, { color: theme.accent }]}>{triggerSummary()}</Text>
+                </View>
+
+                {/* 동작 목록 */}
+                <Text style={[rom.fieldLabel, { color: theme.subText }]}>실행할 동작 (THEN)</Text>
+                {actions.length === 0 && (
+                  <Text style={[rom.emptyHint, { color: theme.subText }]}>아래에서 동작을 하나 이상 추가하세요.</Text>
+                )}
+                {actions.map(action => {
+                  const def = ROUTINE_ACTION_TYPES.find(a => a.key === action.type);
+                  return (
+                    <View key={action.id} style={[rom.actionCard, { backgroundColor: theme.surfaceAlt, borderColor: theme.line }]}>
+                      <View style={rom.actionCardHeader}>
+                        <Text style={rom.optionEmoji}>{def?.emoji}</Text>
+                        <Text style={[rom.optionLabel, { flex: 1, color: theme.text }]}>{def?.label}</Text>
+                        <TouchableOpacity onPress={() => removeAction(action.id)}>
+                          <X color={theme.rose} size={18} strokeWidth={2.5} />
+                        </TouchableOpacity>
+                      </View>
+                      {def?.hasMessage && (
+                        <TextInput
+                          style={[rom.actionInput, { backgroundColor: theme.surface, color: theme.text, borderColor: theme.line }]}
+                          value={action.message} onChangeText={v => updateAction(action.id, { message: v })}
+                          placeholder="메시지 입력 (선택)" placeholderTextColor={theme.subText}
+                        />
+                      )}
+                      {def?.hasContext && (
+                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                          {[{ v: 'worship', l: '⛪ 예배 모드' }, { v: 'normal', l: '☀️ 일상 모드' }].map(({ v, l }) => (
+                            <TouchableOpacity key={v}
+                              style={[rom.contextChip, { borderColor: action.context === v ? theme.accent : theme.line, backgroundColor: action.context === v ? theme.accentDim : 'transparent' }]}
+                              onPress={() => updateAction(action.id, { context: v })}>
+                              <Text style={[rom.contextChipText, { color: action.context === v ? theme.accent : theme.subText }]}>{l}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      )}
+                    </View>
+                  );
+                })}
+
+                {/* 동작 추가 버튼들 */}
+                <Text style={[rom.fieldLabel, { color: theme.subText }]}>동작 추가</Text>
+                <View style={rom.actionBtnGrid}>
+                  {ROUTINE_ACTION_TYPES.map(a => (
+                    <TouchableOpacity key={a.key}
+                      style={[rom.actionChipBtn, { backgroundColor: theme.surfaceAlt, borderColor: theme.line }]}
+                      onPress={() => addAction(a.key)} activeOpacity={0.8}>
+                      <Text style={rom.optionEmoji}>{a.emoji}</Text>
+                      <Text style={[rom.actionChipText, { color: theme.text }]}>{a.label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+                  <TouchableOpacity style={[rom.backBtn, { borderColor: theme.line }]} onPress={() => setStep('config')}>
+                    <Text style={[rom.backBtnText, { color: theme.subText }]}>← 이전</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[rom.saveBtn, { flex: 1, backgroundColor: actions.length > 0 ? theme.accent : theme.line }]}
+                    onPress={handleSave} disabled={actions.length === 0} activeOpacity={0.85}>
+                    <Text style={[rom.saveBtnText, { color: actions.length > 0 ? theme.onAccent : theme.subText }]}>루틴 저장</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+};
+
+const rom = StyleSheet.create({
+  backdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.65)' },
+  sheet: { borderTopLeftRadius: 28, borderTopRightRadius: 28, maxHeight: '94%' },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 20, paddingBottom: 12 },
+  title: { fontSize: 20, fontWeight: '900' },
+  closeBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  stepRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, marginBottom: 4, gap: 8, position: 'relative' },
+  stepItem: { flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 },
+  stepDot: { width: 10, height: 10, borderRadius: 5 },
+  stepLabel: { fontSize: 12, fontWeight: '700' },
+  stepLine: { position: 'absolute', top: 4, left: '50%', right: 0, height: 2, zIndex: -1 },
+  body: { padding: 20, gap: 10, paddingBottom: 40 },
+  fieldLabel: { fontSize: 13, fontWeight: '800', marginTop: 6 },
+  input: { borderWidth: 1.5, borderRadius: 14, padding: 14, fontSize: 16, fontWeight: '700' },
+  optionRow: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1.5, borderRadius: 14, padding: 14 },
+  optionEmoji: { fontSize: 20 },
+  optionLabel: { fontSize: 15, fontWeight: '700' },
+  optionDesc: { fontSize: 12, fontWeight: '500', marginTop: 1 },
+  emptyHint: { fontSize: 13, fontWeight: '600', textAlign: 'center', paddingVertical: 12 },
+  timeDisplay: { borderRadius: 14, padding: 16, alignItems: 'center' },
+  timeText: { fontSize: 40, fontWeight: '900', fontVariant: ['tabular-nums'] },
+  sliderCaption: { fontSize: 12, fontWeight: '700', marginTop: 4 },
+  nextBtn: { borderRadius: 16, paddingVertical: 16, alignItems: 'center', marginTop: 8 },
+  nextBtnText: { fontSize: 17, fontWeight: '900' },
+  summaryBox: { borderWidth: 1.5, borderRadius: 14, padding: 14, gap: 2 },
+  summaryLabel: { fontSize: 11, fontWeight: '700' },
+  summaryText: { fontSize: 16, fontWeight: '900' },
+  actionCard: { borderWidth: 1.5, borderRadius: 14, padding: 14, gap: 0 },
+  actionCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  actionInput: { borderWidth: 1.5, borderRadius: 10, padding: 10, fontSize: 14, fontWeight: '600', marginTop: 10 },
+  contextChip: { flex: 1, borderWidth: 1.5, borderRadius: 10, padding: 10, alignItems: 'center' },
+  contextChipText: { fontSize: 13, fontWeight: '700' },
+  actionBtnGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  actionChipBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1.5, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 12 },
+  actionChipText: { fontSize: 13, fontWeight: '700' },
+  backBtn: { borderWidth: 1.5, borderRadius: 16, paddingVertical: 16, paddingHorizontal: 20, alignItems: 'center' },
+  backBtnText: { fontSize: 15, fontWeight: '700' },
+  saveBtn: { borderRadius: 16, paddingVertical: 16, alignItems: 'center' },
+  saveBtnText: { fontSize: 17, fontWeight: '900' },
+});
+
+// ============================================================================
+// 🗂️ RoutineManagerSection
+// ============================================================================
+const RoutineManagerSection = ({ routines, theme, onAdd, onEdit, onDelete, onToggle }) => (
+  <View>
+    <Text style={[fs.sectionLabel, { color: theme.subText }]}>🔁 커스텀 루틴 관리</Text>
+    <View style={[fs.card, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+      {routines.length === 0 ? (
+        <View style={cms.emptyWrap}>
+          <Play color={theme.subText} size={36} strokeWidth={1.5} />
+          <Text style={[cms.emptyText, { color: theme.subText }]}>
+            등록된 루틴이 없습니다.{'\n'}IF 조건 → THEN 동작을 직접 설계해보세요.
+          </Text>
+        </View>
+      ) : (
+        routines.map((routine, idx) => {
+          const trigDef = ROUTINE_TRIGGER_TYPES.find(t => t.key === routine.trigger.type);
+          const trigLabel = routine.trigger.type === 'time'
+            ? `${String(routine.trigger.hour ?? 0).padStart(2,'0')}:${String(routine.trigger.minute ?? 0).padStart(2,'0')}`
+            : routine.trigger.tagId || routine.trigger.locationId || '';
+          return (
+            <View key={routine.id} style={[cms.row, { borderBottomColor: theme.line, borderBottomWidth: idx < routines.length - 1 ? 1 : 0 }]}>
+              <View style={[cms.iconWrap, { backgroundColor: routine.enabled ? theme.accentDim : theme.surfaceAlt }]}>
+                <Play color={routine.enabled ? theme.accent : theme.subText} size={18} strokeWidth={2.5} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[cms.name, { color: routine.enabled ? theme.text : theme.subText }]}>{routine.name}</Text>
+                <Text style={[cms.sub, { color: theme.subText }]}>
+                  {trigDef?.emoji} {trigDef?.label} · 동작 {routine.actions.length}개
+                </Text>
+              </View>
+              {/* 활성화 토글 */}
+              <TouchableOpacity
+                style={[rms.toggle, { backgroundColor: routine.enabled ? theme.accent : theme.line }]}
+                onPress={() => onToggle(routine.id)} activeOpacity={0.8}>
+                <Text style={[rms.toggleText, { color: routine.enabled ? theme.onAccent : theme.subText }]}>
+                  {routine.enabled ? 'ON' : 'OFF'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[cms.iconBtn, { backgroundColor: theme.surfaceAlt }]} onPress={() => onEdit(routine)} activeOpacity={0.8}>
+                <Pencil color={theme.subText} size={15} strokeWidth={2.5} />
+              </TouchableOpacity>
+              <TouchableOpacity style={[cms.iconBtn, { backgroundColor: theme.surfaceAlt }]} onPress={() => onDelete(routine.id)} activeOpacity={0.8}>
+                <Trash2 color={theme.rose} size={15} strokeWidth={2.5} />
+              </TouchableOpacity>
+            </View>
+          );
+        })
+      )}
+      <TouchableOpacity style={[cms.addBtn, { backgroundColor: theme.accent }]} onPress={onAdd} activeOpacity={0.85}>
+        <Plus color={theme.onAccent} size={20} strokeWidth={3} />
+        <Text style={[cms.addBtnText, { color: theme.onAccent }]}>새 루틴 만들기</Text>
+      </TouchableOpacity>
+    </View>
+  </View>
+);
+
+const rms = StyleSheet.create({
+  toggle: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, marginRight: 4 },
+  toggleText: { fontSize: 11, fontWeight: '900' },
 });
 
 // ============================================================================
@@ -1028,6 +1430,12 @@ export default function App() {
   const [locationPermission, setLocationPermission] = useState(false);
   const [activeGpsZone, setActiveGpsZone]   = useState(null); // 현재 진입한 장소명
 
+  // 커스텀 루틴
+  const [routines, setRoutines]             = useState([]);
+  const [showRoutineModal, setShowRoutineModal] = useState(false);
+  const [editingRoutine, setEditingRoutine] = useState(null);
+  const [routineAlert, setRoutineAlert]     = useState(null); // 시니어 화면 알림 메시지
+
   // 모달
   const [showTagModal, setShowTagModal]         = useState(false);
   const [editingTag, setEditingTag]             = useState(null);
@@ -1038,11 +1446,14 @@ export default function App() {
   // ── refs (stale closure 방지) ─────────────────────────────────────────────
   const tagsRef          = useRef([]);
   const gpsLocationsRef  = useRef([]);
+  const routinesRef      = useRef([]);
   const handlersRef      = useRef({});
   const enteredZonesRef  = useRef(new Set()); // 이미 트리거된 zone ID (중복 방지)
+  const executeRoutineRef = useRef(null);
 
   useEffect(() => { tagsRef.current = tags; }, [tags]);
   useEffect(() => { gpsLocationsRef.current = gpsLocations; }, [gpsLocations]);
+  useEffect(() => { routinesRef.current = routines; }, [routines]);
 
   // ── 시계 ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1074,10 +1485,52 @@ export default function App() {
     handlersRef.current = { handleNFC, handleWorship, handleSafeZone, pushLog };
   }, [handleNFC, handleWorship, handleSafeZone, pushLog]);
 
+  // ── 루틴 실행 엔진 ────────────────────────────────────────────────────────
+  const executeRoutine = useCallback((routine) => {
+    if (!routine.enabled) return;
+    routine.actions.forEach(action => {
+      switch (action.type) {
+        case 'log':
+          handlersRef.current.pushLog(`🔁 [${routine.name}] ${action.message || '루틴 실행됨'}`, 'info');
+          break;
+        case 'alert':
+          setRoutineAlert(action.message || routine.name);
+          setTimeout(() => setRoutineAlert(null), 6000);
+          break;
+        case 'set_context':
+          setContext(action.context || 'normal');
+          handlersRef.current.pushLog(`🎭 [${routine.name}] 컨텍스트 → ${action.context === 'worship' ? '예배 모드' : '일상 모드'}`, 'info');
+          break;
+        case 'medication':
+          setMedicationDone(true);
+          handlersRef.current.pushLog(`💊 [${routine.name}] 복약 완료 처리`, 'info');
+          break;
+        default: break;
+      }
+    });
+  }, []);
+
+  // executeRoutineRef에 최신 함수 유지 (stale closure 방지)
+  useEffect(() => { executeRoutineRef.current = executeRoutine; }, [executeRoutine]);
+
+  // ── 시간 기반 루틴 체커 ───────────────────────────────────────────────────
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const d = new Date();
+      if (d.getSeconds() !== 0) return;
+      const h = d.getHours(), m = d.getMinutes();
+      routinesRef.current
+        .filter(r => r.enabled && r.trigger.type === 'time' && r.trigger.hour === h && r.trigger.minute === m)
+        .forEach(r => executeRoutineRef.current?.(r));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   // ── AsyncStorage 로드 ─────────────────────────────────────────────────────
   useEffect(() => {
     AsyncStorage.getItem(NFC_STORAGE_KEY).then(raw => { if (raw) setTags(JSON.parse(raw)); }).catch(() => {});
     AsyncStorage.getItem(GPS_STORAGE_KEY).then(raw => { if (raw) setGpsLocations(JSON.parse(raw)); }).catch(() => {});
+    AsyncStorage.getItem(ROUTINE_STORAGE_KEY).then(raw => { if (raw) setRoutines(JSON.parse(raw)); }).catch(() => {});
   }, []);
 
   // ── NFC 초기화 ────────────────────────────────────────────────────────────
@@ -1095,7 +1548,6 @@ export default function App() {
           const matched = tagsRef.current.find(t => t.id === id);
           if (!matched) {
             handlersRef.current.pushLog(`🏷️ 미등록 NFC 태그 감지 (${id.slice(0, 8) || '?'}…)`, 'warn');
-            // 미등록 태그 큐에 추가
             setPendingTags(prev => prev.some(t => t.id === id) ? prev : [...prev, { id, detectedAt: Date.now() }]);
             return;
           }
@@ -1105,6 +1557,10 @@ export default function App() {
             case 'home':       handlersRef.current.pushLog(`🏠 NFC 귀가 확인: ${matched.name}`, 'info'); break;
             default:           handlersRef.current.pushLog(`🏷️ NFC 태그 감지: ${matched.name}`, 'info');
           }
+          // 커스텀 루틴 실행 (해당 태그에 연결된 루틴)
+          routinesRef.current
+            .filter(r => r.enabled && r.trigger.type === 'nfc' && r.trigger.tagId === id)
+            .forEach(r => executeRoutineRef.current?.(r));
         });
       } catch (e) { console.warn('NFC init error', e); }
     })();
@@ -1146,6 +1602,10 @@ export default function App() {
             case 'home':    handlersRef.current.pushLog(`🏠 GPS 귀가 확인: ${loc.name}`, 'info'); break;
             default:        handlersRef.current.pushLog(`📍 GPS 장소 진입: ${loc.name}`, 'info');
           }
+          // 커스텀 루틴 실행 (해당 장소에 연결된 루틴)
+          routinesRef.current
+            .filter(r => r.enabled && r.trigger.type === 'gps' && r.trigger.locationId === loc.id)
+            .forEach(r => executeRoutineRef.current?.(r));
         }
       } else {
         enteredZonesRef.current.delete(loc.id);
@@ -1220,6 +1680,39 @@ export default function App() {
   const openEditGps   = useCallback((loc) => { setEditingLocation(loc); setShowLocationModal(true); }, []);
   const closeLocModal = useCallback(() => { setShowLocationModal(false); setEditingLocation(null); }, []);
 
+  // ── 커스텀 루틴 CRUD ──────────────────────────────────────────────────────
+  const handleSaveRoutine = useCallback((routineData) => {
+    setRoutines(prev => {
+      const idx = prev.findIndex(r => r.id === routineData.id);
+      const next = idx >= 0
+        ? prev.map((r, i) => i === idx ? routineData : r)
+        : [...prev, { ...routineData, id: `routine-${Date.now()}`, createdAt: Date.now() }];
+      AsyncStorage.setItem(ROUTINE_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+    setShowRoutineModal(false); setEditingRoutine(null);
+  }, []);
+
+  const handleDeleteRoutine = useCallback((routineId) => {
+    setRoutines(prev => {
+      const next = prev.filter(r => r.id !== routineId);
+      AsyncStorage.setItem(ROUTINE_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const handleToggleRoutine = useCallback((routineId) => {
+    setRoutines(prev => {
+      const next = prev.map(r => r.id === routineId ? { ...r, enabled: !r.enabled } : r);
+      AsyncStorage.setItem(ROUTINE_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const openAddRoutine    = useCallback(() => { setEditingRoutine(null); setShowRoutineModal(true); }, []);
+  const openEditRoutine   = useCallback((r) => { setEditingRoutine(r); setShowRoutineModal(true); }, []);
+  const closeRoutineModal = useCallback(() => { setShowRoutineModal(false); setEditingRoutine(null); }, []);
+
   const theme = context === 'worship' ? THEMES.worship : THEMES.default;
 
   return (
@@ -1247,7 +1740,7 @@ export default function App() {
         <SeniorScreen
           theme={theme} now={now} meals={meals} medicationDone={medicationDone}
           context={context} safeZoneAlert={safeZoneAlert} nfcSupported={nfcSupported}
-          activeGpsZone={activeGpsZone}
+          activeGpsZone={activeGpsZone} routineAlert={routineAlert}
           onTriggerWorship={handleWorship} onTriggerSafeZone={handleSafeZone} onRollback={handleRollback}
         />
       )}
@@ -1259,6 +1752,8 @@ export default function App() {
           tags={tags} onAddTag={openAddTag} onEditTag={openEditTag} onDeleteTag={handleDeleteTag}
           gpsLocations={gpsLocations} onAddGps={openAddGps} onEditGps={openEditGps} onDeleteGps={handleDeleteGps}
           pendingTags={pendingTags} onRegisterPending={openRegisterPending}
+          routines={routines} onAddRoutine={openAddRoutine} onEditRoutine={openEditRoutine}
+          onDeleteRoutine={handleDeleteRoutine} onToggleRoutine={handleToggleRoutine}
         />
       )}
 
@@ -1272,6 +1767,13 @@ export default function App() {
       <LocationModal
         visible={showLocationModal} editLocation={editingLocation}
         theme={theme} onSave={handleSaveGps} onCancel={closeLocModal}
+      />
+
+      {/* 커스텀 루틴 모달 */}
+      <RoutineModal
+        visible={showRoutineModal} editRoutine={editingRoutine}
+        tags={tags} gpsLocations={gpsLocations}
+        theme={theme} onSave={handleSaveRoutine} onCancel={closeRoutineModal}
       />
     </SafeAreaView>
   );
