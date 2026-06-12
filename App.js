@@ -62,14 +62,17 @@ import {
   Smartphone, Users, Radio, Play, Pause, Pill, MapPin, Footprints,
   Church, AlertTriangle, CheckCircle2, BatteryMedium, Wifi, Home,
   Sun, Moon, UtensilsCrossed, ShieldCheck, Activity,
-  Tag, Plus, Pencil, Trash2, X, Navigation,
+  Tag, Plus, Pencil, Trash2, X, Navigation, Send,
 } from 'lucide-react-native';
+import { db } from './firebaseConfig';
+import { ref as dbRef, set, onValue, off } from 'firebase/database';
 
 // ============================================================================
 // 🗄️ 상수
 // ============================================================================
-const NFC_STORAGE_KEY = '@tagroutine:nfc_tags_v1';
-const GPS_STORAGE_KEY = '@tagroutine:gps_locations_v1';
+const NFC_STORAGE_KEY  = '@tagroutine:nfc_tags_v1';
+const GPS_STORAGE_KEY  = '@tagroutine:gps_locations_v1';
+const HOUSEHOLD_KEY    = '@tagroutine:household_id';
 
 const TAG_ACTIONS = [
   { key: 'medication', label: '약 복용 완료',  emoji: '💊' },
@@ -864,6 +867,7 @@ const FamilyScreen = ({
   gpsLocations, onAddGps, onEditGps, onDeleteGps,
   pendingTags, onRegisterPending,
   routines, onAddRoutine, onEditRoutine, onDeleteRoutine, onToggleRoutine,
+  onSendAlert,
 }) => {
   const circleScale = 0.35 + ((radius - 100) / 900) * 0.65;
   const mapSize = SCREEN_W - 80;
@@ -969,6 +973,9 @@ const FamilyScreen = ({
         onAdd={onAddRoutine} onEdit={onEditRoutine}
         onDelete={onDeleteRoutine} onToggle={onToggleRoutine}
       />
+
+      {/* ⑦ 원격 알림 보내기 */}
+      <RemoteAlertSection theme={theme} onSend={onSendAlert} />
     </ScrollView>
   );
 };
@@ -1381,6 +1388,183 @@ const rms = StyleSheet.create({
 });
 
 // ============================================================================
+// 🔗 PairingScreen — 가족 그룹 연결
+// ============================================================================
+const PairingScreen = ({ theme, onPaired }) => {
+  const [step, setStep]               = useState('choose');
+  const [generatedCode, setGeneratedCode] = useState('');
+  const [inputCode, setInputCode]     = useState('');
+  const [loading, setLoading]         = useState(false);
+  const [error, setError]             = useState('');
+
+  const handleCreate = async () => {
+    setLoading(true);
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    try {
+      await set(dbRef(db, `households/${code}/meta`), { createdAt: Date.now() });
+    } catch (_) {}
+    setGeneratedCode(code);
+    setStep('code_display');
+    setLoading(false);
+  };
+
+  const handleConfirmCreate = async () => {
+    await AsyncStorage.setItem(HOUSEHOLD_KEY, generatedCode).catch(() => {});
+    onPaired(generatedCode);
+  };
+
+  const handleJoin = async () => {
+    const code = inputCode.trim();
+    if (!/^\d{6}$/.test(code)) { setError('6자리 숫자 코드를 입력해주세요.'); return; }
+    setLoading(true);
+    await AsyncStorage.setItem(HOUSEHOLD_KEY, code).catch(() => {});
+    onPaired(code);
+    setLoading(false);
+  };
+
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: theme.bg }}>
+      <StatusBar barStyle="light-content" backgroundColor={theme.bg} />
+      <ScrollView contentContainerStyle={ps.wrap}>
+        <View style={[ps.logoBadge, { backgroundColor: theme.accent }]}>
+          <Radio color={theme.onAccent} size={36} strokeWidth={2.5} />
+        </View>
+        <Text style={[ps.brand, { color: theme.text }]}>TagRoutine</Text>
+        <Text style={[ps.tagline, { color: theme.subText }]}>시작하기 전에 가족 그룹을 연결해주세요</Text>
+
+        {step === 'choose' && (
+          <>
+            <TouchableOpacity style={[ps.bigBtn, { backgroundColor: theme.accent }]}
+              onPress={handleCreate} disabled={loading} activeOpacity={0.85}>
+              <Plus color={theme.onAccent} size={32} strokeWidth={2.5} />
+              <View style={{ flex: 1 }}>
+                <Text style={[ps.bigBtnTitle, { color: theme.onAccent }]}>새 가족 그룹 만들기</Text>
+                <Text style={[ps.bigBtnSub, { color: theme.onAccent, opacity: 0.8 }]}>처음 설치 · 코드가 발급됩니다</Text>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[ps.bigBtn, { backgroundColor: theme.surface, borderWidth: 2, borderColor: theme.accent }]}
+              onPress={() => setStep('joining')} activeOpacity={0.85}>
+              <Users color={theme.accent} size={32} strokeWidth={2.5} />
+              <View style={{ flex: 1 }}>
+                <Text style={[ps.bigBtnTitle, { color: theme.accent }]}>기존 그룹에 참여</Text>
+                <Text style={[ps.bigBtnSub, { color: theme.subText }]}>코드를 이미 받은 경우</Text>
+              </View>
+            </TouchableOpacity>
+          </>
+        )}
+
+        {step === 'code_display' && (
+          <View style={ps.subWrap}>
+            <Text style={[ps.codeLabel, { color: theme.subText }]}>가족 그룹 코드</Text>
+            <Text style={[ps.codeHint, { color: theme.subText }]}>이 코드를 가족에게 알려주세요</Text>
+            <View style={[ps.codeBox, { backgroundColor: theme.surface, borderColor: theme.accent }]}>
+              <Text style={[ps.codeDigits, { color: theme.accent }]}>{generatedCode}</Text>
+            </View>
+            <TouchableOpacity style={[ps.bigBtn, { backgroundColor: theme.accent }]}
+              onPress={handleConfirmCreate} activeOpacity={0.85}>
+              <Text style={[ps.bigBtnTitle, { color: theme.onAccent }]}>이 코드로 시작하기 →</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {step === 'joining' && (
+          <View style={ps.subWrap}>
+            <Text style={[ps.codeLabel, { color: theme.subText }]}>가족 그룹 코드 입력</Text>
+            <TextInput
+              style={[ps.codeInput, { backgroundColor: theme.surface, color: theme.text,
+                borderColor: inputCode.length === 6 ? theme.accent : theme.line }]}
+              value={inputCode}
+              onChangeText={t => { setInputCode(t.replace(/\D/g, '')); setError(''); }}
+              placeholder="6자리 코드" placeholderTextColor={theme.subText}
+              keyboardType="numeric" maxLength={6} autoFocus
+            />
+            {error !== '' && <Text style={{ color: theme.rose, fontSize: 14, fontWeight: '700', textAlign: 'center' }}>{error}</Text>}
+            <TouchableOpacity
+              style={[ps.bigBtn, { backgroundColor: inputCode.length === 6 ? theme.accent : theme.line }]}
+              onPress={handleJoin} disabled={loading || inputCode.length !== 6} activeOpacity={0.85}>
+              <Text style={[ps.bigBtnTitle, { color: inputCode.length === 6 ? theme.onAccent : theme.subText }]}>
+                {loading ? '확인 중…' : '그룹 참여 →'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => { setStep('choose'); setError(''); setInputCode(''); }}>
+              <Text style={{ color: theme.subText, fontSize: 14, fontWeight: '700' }}>← 뒤로</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+};
+const ps = StyleSheet.create({
+  wrap:         { flexGrow: 1, alignItems: 'center', justifyContent: 'center', padding: 28, gap: 20 },
+  subWrap:      { width: '100%', gap: 14, alignItems: 'center' },
+  logoBadge:    { width: 72, height: 72, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
+  brand:        { fontSize: 36, fontWeight: '900', letterSpacing: -0.5 },
+  tagline:      { fontSize: 15, fontWeight: '600', textAlign: 'center', marginBottom: 8 },
+  bigBtn:       { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 20, padding: 24, borderRadius: 24 },
+  bigBtnTitle:  { fontSize: 20, fontWeight: '900' },
+  bigBtnSub:    { fontSize: 13, fontWeight: '600', marginTop: 2 },
+  codeLabel:    { fontSize: 18, fontWeight: '800' },
+  codeHint:     { fontSize: 14, fontWeight: '600' },
+  codeBox:      { borderWidth: 2, borderRadius: 20, padding: 24, alignItems: 'center', width: '100%' },
+  codeDigits:   { fontSize: 48, fontWeight: '900', fontVariant: ['tabular-nums'], letterSpacing: 12 },
+  codeInput:    { width: '100%', borderWidth: 2, borderRadius: 16, padding: 20, fontSize: 36,
+                  fontWeight: '900', textAlign: 'center', letterSpacing: 14, fontVariant: ['tabular-nums'] },
+});
+
+// ============================================================================
+// 📢 RemoteAlertSection — 패밀리 → 시니어 원격 알림
+// ============================================================================
+const QUICK_ALERTS = [
+  { label: '💊 약 드실 시간이에요!', msg: '약 드실 시간이에요!' },
+  { label: '🏠 집에 계세요?',       msg: '집에 계세요?' },
+  { label: '⛪ 예배 시간이에요!',   msg: '예배 시간이에요!' },
+  { label: '📞 전화 받아주세요!',   msg: '전화 받아주세요!' },
+];
+
+const RemoteAlertSection = ({ theme, onSend }) => {
+  const [customMsg, setCustomMsg] = useState('');
+  return (
+    <View>
+      <Text style={[fs.sectionLabel, { color: theme.subText }]}>📢 원격 알림 보내기</Text>
+      <View style={[fs.card, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+          {QUICK_ALERTS.map(a => (
+            <TouchableOpacity key={a.msg}
+              style={[ras.chip, { backgroundColor: theme.accentDim, borderColor: theme.accent }]}
+              onPress={() => onSend(a.msg)} activeOpacity={0.8}>
+              <Text style={[ras.chipText, { color: theme.accent }]}>{a.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <View style={ras.row}>
+          <TextInput
+            style={[ras.input, { backgroundColor: theme.surfaceAlt, color: theme.text, borderColor: theme.line, flex: 1 }]}
+            value={customMsg} onChangeText={setCustomMsg}
+            placeholder="직접 입력…" placeholderTextColor={theme.subText}
+            returnKeyType="send" onSubmitEditing={() => { if (customMsg.trim()) { onSend(customMsg.trim()); setCustomMsg(''); } }}
+          />
+          <TouchableOpacity
+            style={[ras.sendBtn, { backgroundColor: customMsg.trim() ? theme.accent : theme.line }]}
+            onPress={() => { if (customMsg.trim()) { onSend(customMsg.trim()); setCustomMsg(''); } }}
+            disabled={!customMsg.trim()} activeOpacity={0.85}>
+            <Send color={customMsg.trim() ? theme.onAccent : theme.subText} size={18} strokeWidth={2.5} />
+          </TouchableOpacity>
+        </View>
+      </View>
+    </View>
+  );
+};
+const ras = StyleSheet.create({
+  chip:     { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderWidth: 1.5 },
+  chipText: { fontSize: 13, fontWeight: '700' },
+  row:      { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  input:    { borderWidth: 1.5, borderRadius: 12, padding: 12, fontSize: 14, fontWeight: '600' },
+  sendBtn:  { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+});
+
+// ============================================================================
 // 🚪 SelectionScreen
 // ============================================================================
 const SelectionScreen = ({ theme, onSelect }) => (
@@ -1426,6 +1610,9 @@ export default function App() {
   const [battery, setBattery]               = useState(82);
   const [logs, setLogs]                     = useState([]);
   const [now, setNow]                       = useState(new Date());
+
+  // 가족 그룹 연결
+  const [householdId, setHouseholdId]       = useState(null);
 
   // NFC
   const [nfcSupported, setNfcSupported]     = useState(false);
@@ -1538,7 +1725,96 @@ export default function App() {
     AsyncStorage.getItem(NFC_STORAGE_KEY).then(raw => { if (raw) setTags(JSON.parse(raw)); }).catch(() => {});
     AsyncStorage.getItem(GPS_STORAGE_KEY).then(raw => { if (raw) setGpsLocations(JSON.parse(raw)); }).catch(() => {});
     AsyncStorage.getItem(ROUTINE_STORAGE_KEY).then(raw => { if (raw) setRoutines(JSON.parse(raw)); }).catch(() => {});
+    AsyncStorage.getItem(HOUSEHOLD_KEY).then(id => { if (id) setHouseholdId(id); }).catch(() => {});
   }, []);
+
+  // ── Firebase: 패밀리 → config 업로드 ─────────────────────────────────────
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/config/tags`), tags).catch(() => {});
+  }, [tags, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/config/gpsLocations`), gpsLocations).catch(() => {});
+  }, [gpsLocations, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/config/routines`), routines).catch(() => {});
+  }, [routines, mode, householdId]);
+
+  // ── Firebase: 시니어 → config 구독 (패밀리가 설정한 내용 수신) ─────────────
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    const tagsR    = dbRef(db, `households/${householdId}/config/tags`);
+    const gpsR     = dbRef(db, `households/${householdId}/config/gpsLocations`);
+    const routineR = dbRef(db, `households/${householdId}/config/routines`);
+    onValue(tagsR,    snap => { const v = snap.val(); if (v) setTags(v); });
+    onValue(gpsR,     snap => { const v = snap.val(); if (v) setGpsLocations(v); });
+    onValue(routineR, snap => { const v = snap.val(); if (v) setRoutines(v); });
+    return () => { off(tagsR); off(gpsR); off(routineR); };
+  }, [mode, householdId]);
+
+  // ── Firebase: 시니어 → status 업로드 ─────────────────────────────────────
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/status/medicationDone`), medicationDone).catch(() => {});
+  }, [medicationDone, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/status/context`), context).catch(() => {});
+  }, [context, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/status/safeZoneAlert`), safeZoneAlert).catch(() => {});
+  }, [safeZoneAlert, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/status/logs`), logs).catch(() => {});
+  }, [logs, mode, householdId]);
+
+  // ── Firebase: 패밀리 → status 구독 (시니어 실시간 모니터링) ──────────────
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    const statusR = dbRef(db, `households/${householdId}/status`);
+    onValue(statusR, snap => {
+      const d = snap.val();
+      if (!d) return;
+      if (d.medicationDone !== undefined) setMedicationDone(d.medicationDone);
+      if (d.context)                      setContext(d.context);
+      if (d.safeZoneAlert !== undefined)  setSafeZoneAlert(d.safeZoneAlert);
+      if (Array.isArray(d.logs))          setLogs(d.logs);
+    });
+    return () => off(statusR);
+  }, [mode, householdId]);
+
+  // ── Firebase: 패밀리 → 시니어 원격 알림 전송 ─────────────────────────────
+  const sendRemoteAlert = useCallback(async (message) => {
+    if (!householdId) return;
+    set(dbRef(db, `households/${householdId}/commands/latestAlert`), {
+      message, sentAt: Date.now(),
+    }).catch(() => {});
+    pushLog(`📢 원격 알림 전송: "${message}"`, 'info');
+  }, [householdId, pushLog]);
+
+  // ── Firebase: 시니어 → 패밀리 알림 수신 ────────────────────────────────
+  const lastAlertTsRef = useRef(0);
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    const alertR = dbRef(db, `households/${householdId}/commands/latestAlert`);
+    onValue(alertR, snap => {
+      const d = snap.val();
+      if (!d || d.sentAt <= lastAlertTsRef.current) return;
+      lastAlertTsRef.current = d.sentAt;
+      setRoutineAlert(`📢 가족 알림: ${d.message}`);
+      setTimeout(() => setRoutineAlert(null), 8000);
+    });
+    return () => off(alertR);
+  }, [mode, householdId]);
 
   // ── NFC 초기화 ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1722,23 +1998,35 @@ export default function App() {
 
   const theme = context === 'worship' ? THEMES.worship : THEMES.default;
 
+  // 페어링 안 된 상태면 PairingScreen 먼저 표시
+  if (!householdId) {
+    return <PairingScreen theme={theme} onPaired={setHouseholdId} />;
+  }
+
   return (
     <SafeAreaView style={[app.root, { backgroundColor: theme.bg }]}>
       <StatusBar barStyle="light-content" backgroundColor={theme.bg} />
 
       {mode !== 'selection' && (
-        <View style={[app.segment, { backgroundColor: theme.surface, borderColor: theme.line }]}>
-          {[
-            { key: 'senior', icon: <Smartphone color={mode === 'senior' ? theme.onAccent : theme.subText} size={20} strokeWidth={2.5} />, label: '시니어 모드' },
-            { key: 'family', icon: <Users color={mode === 'family' ? theme.onAccent : theme.subText} size={20} strokeWidth={2.5} />, label: '패밀리 모드' },
-          ].map(seg => (
-            <TouchableOpacity key={seg.key} activeOpacity={0.85}
-              style={[app.segmentBtn, mode === seg.key && { backgroundColor: theme.accent }]}
-              onPress={() => setMode(seg.key)}>
-              {seg.icon}
-              <Text style={[app.segmentText, { color: mode === seg.key ? theme.onAccent : theme.subText }]}>{seg.label}</Text>
-            </TouchableOpacity>
-          ))}
+        <View>
+          <View style={[app.segment, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+            {[
+              { key: 'senior', icon: <Smartphone color={mode === 'senior' ? theme.onAccent : theme.subText} size={20} strokeWidth={2.5} />, label: '시니어 모드' },
+              { key: 'family', icon: <Users color={mode === 'family' ? theme.onAccent : theme.subText} size={20} strokeWidth={2.5} />, label: '패밀리 모드' },
+            ].map(seg => (
+              <TouchableOpacity key={seg.key} activeOpacity={0.85}
+                style={[app.segmentBtn, mode === seg.key && { backgroundColor: theme.accent }]}
+                onPress={() => setMode(seg.key)}>
+                {seg.icon}
+                <Text style={[app.segmentText, { color: mode === seg.key ? theme.onAccent : theme.subText }]}>{seg.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {/* 그룹 코드 배지 */}
+          <View style={app.householdBadge}>
+            <Text style={[app.householdText, { color: theme.subText }]}>그룹 </Text>
+            <Text style={[app.householdText, { color: theme.accent, fontWeight: '900' }]}>{householdId}</Text>
+          </View>
         </View>
       )}
 
@@ -1761,6 +2049,7 @@ export default function App() {
           pendingTags={pendingTags} onRegisterPending={openRegisterPending}
           routines={routines} onAddRoutine={openAddRoutine} onEditRoutine={openEditRoutine}
           onDeleteRoutine={handleDeleteRoutine} onToggleRoutine={handleToggleRoutine}
+          onSendAlert={sendRemoteAlert}
         />
       )}
 
@@ -1788,7 +2077,9 @@ export default function App() {
 
 const app = StyleSheet.create({
   root: { flex: 1 },
-  segment: { flexDirection: 'row', margin: 16, marginBottom: 8, padding: 5, borderRadius: 18, borderWidth: 1, gap: 4 },
+  segment: { flexDirection: 'row', margin: 16, marginBottom: 4, padding: 5, borderRadius: 18, borderWidth: 1, gap: 4 },
   segmentBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: 14 },
   segmentText: { fontSize: 15, fontWeight: '800' },
+  householdBadge: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginBottom: 4 },
+  householdText: { fontSize: 11, fontWeight: '600', fontVariant: ['tabular-nums'] },
 });
