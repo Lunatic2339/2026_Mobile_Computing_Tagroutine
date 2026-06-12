@@ -30,11 +30,26 @@
         "android.permission.NFC",
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION"
-      ]
+      ],
+      "package": "com.charmender.TagRoutine"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "plugins": ["react-native-nfc-manager"]
+    "plugins": [
+      "react-native-nfc-manager",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "시니어 모드에서 등록된 장소 진입 시 자동으로 루틴을 실행합니다.",
+          "locationWhenInUsePermission": "시니어 모드에서 등록된 장소 진입 시 자동으로 루틴을 실행합니다."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "8185b273-54a5-4ffe-a635-369bbcc2c905"
+      }
+    }
   }
 }
