@@ -48,28 +48,38 @@ try {
   Location = {
     requestForegroundPermissionsAsync: async () => ({ status: 'denied' }),
     getCurrentPositionAsync: async () => ({ coords: { latitude: 37.5665, longitude: 126.9780 } }),
+    getLastKnownPositionAsync: async () => ({ coords: { latitude: 37.5665, longitude: 126.9780 } }),
     watchPositionAsync: async (_opts, _cb) => ({ remove: () => {} }),
     Accuracy: { High: 4, Balanced: 3, Low: 1 },
   };
 }
 
+let WebView = null;
+try {
+  WebView = require('react-native-webview').WebView;
+} catch (_) {}
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, ScrollView, Animated, PanResponder,
   StyleSheet, SafeAreaView, StatusBar, Easing, Dimensions, Modal, TextInput,
+  Alert, BackHandler,
 } from 'react-native';
 import {
   Smartphone, Users, Radio, Play, Pause, Pill, MapPin, Footprints,
   Church, AlertTriangle, CheckCircle2, BatteryMedium, Wifi, Home,
   Sun, Moon, UtensilsCrossed, ShieldCheck, Activity,
-  Tag, Plus, Pencil, Trash2, X, Navigation,
+  Tag, Plus, Pencil, Trash2, X, Navigation, Send, LogOut,
 } from 'lucide-react-native';
+import { db } from './firebaseConfig';
+import { ref as dbRef, set, get, onValue, off } from 'firebase/database';
 
 // ============================================================================
 // 🗄️ 상수
 // ============================================================================
-const NFC_STORAGE_KEY = '@tagroutine:nfc_tags_v1';
-const GPS_STORAGE_KEY = '@tagroutine:gps_locations_v1';
+const NFC_STORAGE_KEY  = '@tagroutine:nfc_tags_v1';
+const GPS_STORAGE_KEY  = '@tagroutine:gps_locations_v1';
+const HOUSEHOLD_KEY    = '@tagroutine:household_id';
 
 const TAG_ACTIONS = [
   { key: 'medication', label: '약 복용 완료',  emoji: '💊' },
@@ -84,7 +94,9 @@ const GPS_ACTIONS = [
   { key: 'custom',  label: '기록만 남기기', emoji: '📝' },
 ];
 
-const ROUTINE_STORAGE_KEY = '@tagroutine:routines_v1';
+const ROUTINE_STORAGE_KEY   = '@tagroutine:routines_v1';
+const MESSAGES_STORAGE_KEY  = '@tagroutine:family_messages_v1';
+const MEDICATION_DATE_KEY   = '@tagroutine:medication_date';
 
 const ROUTINE_TRIGGER_TYPES = [
   { key: 'nfc',  label: 'NFC 태그 스캔',  emoji: '🏷️', desc: '등록된 태그를 스캔했을 때' },
@@ -197,6 +209,55 @@ const sls = StyleSheet.create({
   track: { height: 8, borderRadius: 4, overflow: 'hidden' },
   fill: { height: 8, borderRadius: 4 },
   thumb: { position: 'absolute', width: 26, height: 26, borderRadius: 13, marginLeft: -13, top: 9, shadowOpacity: 0.6, shadowRadius: 8, shadowOffset: { width: 0, height: 0 }, elevation: 6 },
+});
+
+// ============================================================================
+// 🗺️ MapPreview — Leaflet/OSM 실제 지도 (react-native-webview)
+// ============================================================================
+const MapPreview = ({ lat, lng, theme }) => {
+  if (!WebView) {
+    return (
+      <View style={[mps.fallback, { backgroundColor: theme.surfaceAlt }]}>
+        <MapPin color={theme.accent} size={22} strokeWidth={2.5} />
+        <Text style={[mps.fallbackText, { color: theme.subText }]}>
+          {lat.toFixed(5)}° N  {lng.toFixed(5)}° E
+        </Text>
+        <Text style={[mps.fallbackHint, { color: theme.subText }]}>지도 미지원 환경</Text>
+      </View>
+    );
+  }
+  const html = `<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>*{margin:0;padding:0}html,body,#m{width:100%;height:100%;background:#141A18}</style>
+</head><body><div id="m"></div><script>
+try{
+  var m=L.map('m',{zoomControl:true,attributionControl:false}).setView([${lat},${lng}],16);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(m);
+  L.marker([${lat},${lng}]).addTo(m);
+}catch(e){}
+</script></body></html>`;
+  return (
+    <View style={mps.wrapper}>
+      <WebView
+        source={{ html }}
+        style={{ flex: 1 }}
+        javaScriptEnabled
+        domStorageEnabled
+        originWhitelist={['*']}
+        scrollEnabled={false}
+        showsHorizontalScrollIndicator={false}
+        showsVerticalScrollIndicator={false}
+      />
+    </View>
+  );
+};
+const mps = StyleSheet.create({
+  fallback: { height: 180, borderRadius: 12, alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 12 },
+  fallbackText: { fontSize: 13, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  fallbackHint: { fontSize: 11, fontWeight: '600' },
+  wrapper: { height: 180, borderRadius: 12, marginBottom: 12, overflow: 'hidden' },
 });
 
 // ============================================================================
@@ -486,15 +547,28 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
     setFetching(true); setLocError('');
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') { setLocError('위치 권한이 없습니다.'); setFetching(false); return; }
-      // Balanced 우선 시도 → 실패 시 마지막으로 알려진 위치로 폴백
+      if (status !== 'granted') { setLocError('위치 권한이 없습니다. 설정 → 앱 → 위치를 허용해주세요.'); setFetching(false); return; }
+
+      // 8초 타임아웃 → 초과 시 마지막 위치로 폴백
+      const withTimeout = (promise, ms) =>
+        Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+
       let loc = null;
       try {
-        loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        loc = await withTimeout(
+          Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+          8000
+        );
       } catch (_) {
-        loc = await Location.getLastKnownPositionAsync();
+        // GPS 신호 없거나 타임아웃 → 마지막으로 알려진 위치 사용
+        try { loc = await Location.getLastKnownPositionAsync(); } catch (__) {}
       }
-      if (!loc) { setLocError('위치를 가져올 수 없습니다. 실외에서 GPS를 켜고 다시 시도하세요.'); setFetching(false); return; }
+
+      if (!loc) {
+        setLocError('위치를 가져올 수 없습니다. GPS를 켜고 잠시 후 다시 시도하세요.');
+        setFetching(false);
+        return;
+      }
       setLocLat(loc.coords.latitude);
       setLocLng(loc.coords.longitude);
     } catch (e) {
@@ -548,12 +622,15 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
                 <Text style={[lm.errorText, { color: theme.rose }]}>{locError}</Text>
               )}
               {locLat != null && (
-                <View style={[lm.coordBox, { backgroundColor: theme.surfaceAlt }]}>
-                  <MapPin color={theme.accent} size={14} strokeWidth={2.5} />
-                  <Text style={[lm.coordText, { color: theme.subText }]}>
-                    {locLat.toFixed(5)}° N,  {locLng.toFixed(5)}° E
-                  </Text>
-                </View>
+                <>
+                  <MapPreview lat={locLat} lng={locLng} theme={theme} />
+                  <View style={[lm.coordBox, { backgroundColor: theme.surfaceAlt }]}>
+                    <MapPin color={theme.accent} size={14} strokeWidth={2.5} />
+                    <Text style={[lm.coordText, { color: theme.subText }]}>
+                      {locLat.toFixed(5)}° N,  {locLng.toFixed(5)}° E
+                    </Text>
+                  </View>
+                </>
               )}
 
               {/* 감지 반경 */}
@@ -729,11 +806,24 @@ const cms = StyleSheet.create({
 const SeniorScreen = ({
   theme, now, meals, medicationDone, context, safeZoneAlert,
   nfcSupported, activeGpsZone, routineAlert,
+  familyMessages, routines,
+  persistentAlerts, onDismissAlert,
   onTriggerWorship, onTriggerSafeZone, onRollback,
 }) => {
   const [playing, setPlaying] = useState(false);
+  const [msgIdx, setMsgIdx]   = useState(0);
   const nowMins = now.getHours() * 60 + now.getMinutes();
   const nextMeal = meals.find(m => m.timeMins >= nowMins) || meals[0];
+
+  const timeRoutines = (routines || [])
+    .filter(r => r.enabled && r.trigger.type === 'time')
+    .sort((a, b) => (a.trigger.hour * 60 + a.trigger.minute) - (b.trigger.hour * 60 + b.trigger.minute));
+  const otherRoutines = (routines || []).filter(r => r.enabled && r.trigger.type !== 'time');
+  const allRoutines = [...timeRoutines, ...otherRoutines];
+
+  const currentMsg = familyMessages && familyMessages.length > 0
+    ? familyMessages[msgIdx % familyMessages.length]
+    : null;
 
   const actionCard = medicationDone
     ? { icon: <UtensilsCrossed color={theme.accent} size={48} strokeWidth={2.5} />, title: `${nextMeal.label} 식사`, sub: `${minutesToLabel(nextMeal.timeMins)} 에 알려드려요` }
@@ -741,6 +831,20 @@ const SeniorScreen = ({
 
   return (
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+      {/* 패밀리 원격 알림 목록 — 각각 수동으로 확인해야 사라짐 */}
+      {persistentAlerts.map(alert => (
+        <TouchableOpacity
+          key={alert.id}
+          style={[ss.persistBanner, { backgroundColor: theme.amber }]}
+          onPress={() => onDismissAlert(alert.id)} activeOpacity={0.85}>
+          <Text style={ss.persistIcon}>📢</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={ss.persistFrom}>가족 알림</Text>
+            <Text style={ss.persistMsg}>{alert.message}</Text>
+          </View>
+          <Text style={ss.persistDismiss}>확인 ✓</Text>
+        </TouchableOpacity>
+      ))}
       {safeZoneAlert && (
         <View style={[ss.alertBanner, { backgroundColor: theme.rose }]}>
           <AlertTriangle color="#FFF" size={32} strokeWidth={2.5} />
@@ -790,10 +894,20 @@ const SeniorScreen = ({
         </View>
       </View>
 
+      {/* 가족 안부인사 카드 */}
       <View style={[ss.radioCard, { backgroundColor: theme.surface, borderColor: theme.line }]}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
           <Radio color={theme.accent} size={32} strokeWidth={2.5} />
-          <Text style={[ss.radioTitle, { color: theme.text }]}>딸의 아침 인사</Text>
+          <Text style={[ss.radioTitle, { color: theme.text }]}>
+            {currentMsg ? `${currentMsg.from}의 인사` : '가족 인사'}
+          </Text>
+          {familyMessages && familyMessages.length > 1 && (
+            <TouchableOpacity
+              style={[ss.msgNextBtn, { backgroundColor: theme.accentDim }]}
+              onPress={() => setMsgIdx(i => i + 1)} activeOpacity={0.8}>
+              <Text style={{ color: theme.accent, fontSize: 12, fontWeight: '800' }}>다음 ›</Text>
+            </TouchableOpacity>
+          )}
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 18 }}>
           <TouchableOpacity activeOpacity={0.8} style={[ss.playBtn, { backgroundColor: theme.accent }]} onPress={() => setPlaying(p => !p)}>
@@ -803,14 +917,39 @@ const SeniorScreen = ({
           </TouchableOpacity>
           <VoiceVisualizer playing={playing} theme={theme} />
         </View>
-        <Text style={[ss.radioScript, { color: theme.subText }]}>"아버지, 점심 약 꼭 챙겨 드세요!"</Text>
+        <Text style={[ss.radioScript, { color: theme.subText }]}>
+          {currentMsg ? `"${currentMsg.text}"` : '"아버지, 건강하게 지내세요!"'}
+        </Text>
       </View>
 
-      <Text style={[ss.panelLabel, { color: theme.subText }]}>⚙️ GPS 센서 시뮬레이션</Text>
-      <View style={{ gap: 12 }}>
-        <SensorButton theme={theme} icon={<Church color={theme.text} size={28} strokeWidth={2.5} />} label="💡 GPS 트리거 · 예배당 진입" onPress={onTriggerWorship} />
-        <SensorButton theme={theme} icon={<Footprints color={theme.text} size={28} strokeWidth={2.5} />} label="🚶‍♂️ GPS 트리거 · Safe Zone 이탈" onPress={onTriggerSafeZone} />
-      </View>
+      {/* 등록된 루틴 전체 */}
+      {allRoutines.length > 0 && (
+        <View style={[ss.scheduleCard, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+          <Text style={[ss.scheduleTitle, { color: theme.subText }]}>📅 등록된 루틴</Text>
+          {allRoutines.map(r => {
+            if (r.trigger.type === 'time') {
+              const isPast = r.trigger.hour * 60 + r.trigger.minute < nowMins;
+              return (
+                <View key={r.id} style={ss.scheduleRow}>
+                  <Text style={[ss.scheduleTime, { color: isPast ? theme.subText : theme.accent }]}>
+                    {String(r.trigger.hour).padStart(2,'0')}:{String(r.trigger.minute).padStart(2,'0')}
+                  </Text>
+                  <Text style={[ss.scheduleName, { color: isPast ? theme.subText : theme.text }]}>
+                    {isPast ? '✓ ' : '› '}{r.name}
+                  </Text>
+                </View>
+              );
+            }
+            const trigIcon = r.trigger.type === 'nfc' ? '🏷️' : '📍';
+            return (
+              <View key={r.id} style={ss.scheduleRow}>
+                <Text style={[ss.scheduleTime, { color: theme.accent, fontSize: 22 }]}>{trigIcon}</Text>
+                <Text style={[ss.scheduleName, { color: theme.text }]}>› {r.name}</Text>
+              </View>
+            );
+          })}
+        </View>
+      )}
 
       <TouchableOpacity activeOpacity={0.85} style={[ss.rollbackBtn, { backgroundColor: theme.amber }]} onPress={onRollback}>
         <Home color="#1A1304" size={36} strokeWidth={3} />
@@ -819,14 +958,6 @@ const SeniorScreen = ({
     </ScrollView>
   );
 };
-
-const SensorButton = ({ theme, icon, label, onPress }) => (
-  <TouchableOpacity activeOpacity={0.8} onPress={onPress}
-    style={[ss.sensorBtn, { backgroundColor: theme.surfaceAlt, borderColor: theme.line }]}>
-    {icon}
-    <Text style={[ss.sensorText, { color: theme.text }]}>{label}</Text>
-  </TouchableOpacity>
-);
 
 const ss = StyleSheet.create({
   alertBanner: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 18, borderRadius: 20, marginBottom: 16 },
@@ -848,10 +979,19 @@ const ss = StyleSheet.create({
   playBtn: { width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center' },
   radioScript: { fontSize: 24, fontWeight: '600', fontStyle: 'italic' },
   panelLabel: { fontSize: 16, fontWeight: '800', marginBottom: 10, letterSpacing: 0.5 },
-  sensorBtn: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 18, borderRadius: 18, borderWidth: 1 },
-  sensorText: { fontSize: 18, fontWeight: '700', flex: 1 },
+  msgNextBtn:    { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
+  scheduleCard:  { borderRadius: 20, borderWidth: 1.5, padding: 18, marginBottom: 16 },
+  scheduleTitle: { fontSize: 14, fontWeight: '800', marginBottom: 10, letterSpacing: 0.3 },
+  scheduleRow:   { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 6 },
+  scheduleTime:  { fontSize: 22, fontWeight: '900', fontVariant: ['tabular-nums'], width: 70 },
+  scheduleName:  { fontSize: 18, fontWeight: '700', flex: 1 },
   rollbackBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, paddingVertical: 24, borderRadius: 24, marginTop: 28 },
   rollbackText: { color: '#1A1304', fontSize: 24, fontWeight: '900' },
+  persistBanner: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 20, borderRadius: 22, marginBottom: 16 },
+  persistIcon: { fontSize: 36 },
+  persistFrom: { fontSize: 18, fontWeight: '800', color: '#1A1304' },
+  persistMsg: { fontSize: 24, fontWeight: '700', color: '#1A1304', marginTop: 2, lineHeight: 30 },
+  persistDismiss: { fontSize: 16, fontWeight: '900', color: '#1A1304', opacity: 0.6 },
 });
 
 // ============================================================================
@@ -864,6 +1004,8 @@ const FamilyScreen = ({
   gpsLocations, onAddGps, onEditGps, onDeleteGps,
   pendingTags, onRegisterPending,
   routines, onAddRoutine, onEditRoutine, onDeleteRoutine, onToggleRoutine,
+  onSendAlert,
+  familyMessages, onAddMessage, onDeleteMessage,
 }) => {
   const circleScale = 0.35 + ((radius - 100) / 900) * 0.65;
   const mapSize = SCREEN_W - 80;
@@ -966,9 +1108,19 @@ const FamilyScreen = ({
       {/* ⑥ 커스텀 루틴 관리 */}
       <RoutineManagerSection
         routines={routines} theme={theme}
+        tags={tags} gpsLocations={gpsLocations}
         onAdd={onAddRoutine} onEdit={onEditRoutine}
         onDelete={onDeleteRoutine} onToggle={onToggleRoutine}
       />
+
+      {/* ⑦ 가족 안부인사 관리 */}
+      <FamilyMessageSection
+        messages={familyMessages} theme={theme}
+        onAdd={onAddMessage} onDelete={onDeleteMessage}
+      />
+
+      {/* ⑧ 원격 알림 보내기 */}
+      <RemoteAlertSection theme={theme} onSend={onSendAlert} />
     </ScrollView>
   );
 };
@@ -1321,7 +1473,7 @@ const rom = StyleSheet.create({
 // ============================================================================
 // 🗂️ RoutineManagerSection
 // ============================================================================
-const RoutineManagerSection = ({ routines, theme, onAdd, onEdit, onDelete, onToggle }) => (
+const RoutineManagerSection = ({ routines, theme, tags, gpsLocations, onAdd, onEdit, onDelete, onToggle }) => (
   <View>
     <Text style={[fs.sectionLabel, { color: theme.subText }]}>🔁 커스텀 루틴 관리</Text>
     <View style={[fs.card, { backgroundColor: theme.surface, borderColor: theme.line }]}>
@@ -1337,7 +1489,9 @@ const RoutineManagerSection = ({ routines, theme, onAdd, onEdit, onDelete, onTog
           const trigDef = ROUTINE_TRIGGER_TYPES.find(t => t.key === routine.trigger.type);
           const trigLabel = routine.trigger.type === 'time'
             ? `${String(routine.trigger.hour ?? 0).padStart(2,'0')}:${String(routine.trigger.minute ?? 0).padStart(2,'0')}`
-            : routine.trigger.tagId || routine.trigger.locationId || '';
+            : routine.trigger.type === 'nfc'
+              ? ((tags || []).find(t => t.id === routine.trigger.tagId)?.name || routine.trigger.tagId || '')
+              : ((gpsLocations || []).find(l => l.id === routine.trigger.locationId)?.name || routine.trigger.locationId || '');
           return (
             <View key={routine.id} style={[cms.row, { borderBottomColor: theme.line, borderBottomWidth: idx < routines.length - 1 ? 1 : 0 }]}>
               <View style={[cms.iconWrap, { backgroundColor: routine.enabled ? theme.accentDim : theme.surfaceAlt }]}>
@@ -1346,7 +1500,7 @@ const RoutineManagerSection = ({ routines, theme, onAdd, onEdit, onDelete, onTog
               <View style={{ flex: 1 }}>
                 <Text style={[cms.name, { color: routine.enabled ? theme.text : theme.subText }]}>{routine.name}</Text>
                 <Text style={[cms.sub, { color: theme.subText }]}>
-                  {trigDef?.emoji} {trigDef?.label} · 동작 {routine.actions.length}개
+                  {trigDef?.emoji} {trigLabel ? trigLabel : trigDef?.label} · 동작 {routine.actions.length}개
                 </Text>
               </View>
               {/* 활성화 토글 */}
@@ -1378,6 +1532,267 @@ const RoutineManagerSection = ({ routines, theme, onAdd, onEdit, onDelete, onTog
 const rms = StyleSheet.create({
   toggle: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, marginRight: 4 },
   toggleText: { fontSize: 11, fontWeight: '900' },
+});
+
+// ============================================================================
+// 🔗 PairingScreen — 가족 그룹 연결
+// ============================================================================
+const PairingScreen = ({ theme, onPaired }) => {
+  const [step, setStep]               = useState('choose');
+  const [generatedCode, setGeneratedCode] = useState('');
+  const [inputCode, setInputCode]     = useState('');
+  const [loading, setLoading]         = useState(false);
+  const [error, setError]             = useState('');
+
+  const handleCreate = async () => {
+    setLoading(true);
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    try {
+      await set(dbRef(db, `households/${code}/meta`), { createdAt: Date.now() });
+    } catch (_) {}
+    setGeneratedCode(code);
+    setStep('code_display');
+    setLoading(false);
+  };
+
+  const handleConfirmCreate = async () => {
+    await AsyncStorage.setItem(HOUSEHOLD_KEY, generatedCode).catch(() => {});
+    onPaired(generatedCode);
+  };
+
+  const handleJoin = async () => {
+    const code = inputCode.trim();
+    if (!/^\d{6}$/.test(code)) { setError('6자리 숫자 코드를 입력해주세요.'); return; }
+    setLoading(true);
+    try {
+      const snap = await get(dbRef(db, `households/${code}/meta`));
+      if (!snap.exists()) {
+        setError('존재하지 않는 코드입니다. 그룹 생성자에게 코드를 다시 확인해주세요.');
+        setLoading(false);
+        return;
+      }
+    } catch (_) {
+      setError('네트워크 오류가 발생했습니다. 다시 시도해주세요.');
+      setLoading(false);
+      return;
+    }
+    await AsyncStorage.setItem(HOUSEHOLD_KEY, code).catch(() => {});
+    onPaired(code);
+    setLoading(false);
+  };
+
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: theme.bg }}>
+      <StatusBar barStyle="light-content" backgroundColor={theme.bg} />
+      <ScrollView contentContainerStyle={ps.wrap}>
+        <View style={[ps.logoBadge, { backgroundColor: theme.accent }]}>
+          <Radio color={theme.onAccent} size={36} strokeWidth={2.5} />
+        </View>
+        <Text style={[ps.brand, { color: theme.text }]}>TagRoutine</Text>
+        <Text style={[ps.tagline, { color: theme.subText }]}>시작하기 전에 가족 그룹을 연결해주세요</Text>
+
+        {step === 'choose' && (
+          <>
+            <TouchableOpacity style={[ps.bigBtn, { backgroundColor: theme.accent }]}
+              onPress={handleCreate} disabled={loading} activeOpacity={0.85}>
+              <Plus color={theme.onAccent} size={32} strokeWidth={2.5} />
+              <View style={{ flex: 1 }}>
+                <Text style={[ps.bigBtnTitle, { color: theme.onAccent }]}>새 가족 그룹 만들기</Text>
+                <Text style={[ps.bigBtnSub, { color: theme.onAccent, opacity: 0.8 }]}>처음 설치 · 코드가 발급됩니다</Text>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[ps.bigBtn, { backgroundColor: theme.surface, borderWidth: 2, borderColor: theme.accent }]}
+              onPress={() => setStep('joining')} activeOpacity={0.85}>
+              <Users color={theme.accent} size={32} strokeWidth={2.5} />
+              <View style={{ flex: 1 }}>
+                <Text style={[ps.bigBtnTitle, { color: theme.accent }]}>기존 그룹에 참여</Text>
+                <Text style={[ps.bigBtnSub, { color: theme.subText }]}>코드를 이미 받은 경우</Text>
+              </View>
+            </TouchableOpacity>
+          </>
+        )}
+
+        {step === 'code_display' && (
+          <View style={ps.subWrap}>
+            <Text style={[ps.codeLabel, { color: theme.subText }]}>가족 그룹 코드</Text>
+            <Text style={[ps.codeHint, { color: theme.subText }]}>이 코드를 가족에게 알려주세요</Text>
+            <View style={[ps.codeBox, { backgroundColor: theme.surface, borderColor: theme.accent }]}>
+              <Text style={[ps.codeDigits, { color: theme.accent }]}>{generatedCode}</Text>
+            </View>
+            <TouchableOpacity style={[ps.bigBtn, { backgroundColor: theme.accent }]}
+              onPress={handleConfirmCreate} activeOpacity={0.85}>
+              <Text style={[ps.bigBtnTitle, { color: theme.onAccent }]}>이 코드로 시작하기 →</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {step === 'joining' && (
+          <View style={ps.subWrap}>
+            <Text style={[ps.codeLabel, { color: theme.subText }]}>가족 그룹 코드 입력</Text>
+            <TextInput
+              style={[ps.codeInput, { backgroundColor: theme.surface, color: theme.text,
+                borderColor: inputCode.length === 6 ? theme.accent : theme.line }]}
+              value={inputCode}
+              onChangeText={t => { setInputCode(t.replace(/\D/g, '')); setError(''); }}
+              placeholder="6자리 코드" placeholderTextColor={theme.subText}
+              keyboardType="numeric" maxLength={6} autoFocus
+            />
+            {error !== '' && <Text style={{ color: theme.rose, fontSize: 14, fontWeight: '700', textAlign: 'center' }}>{error}</Text>}
+            <TouchableOpacity
+              style={[ps.bigBtn, { backgroundColor: inputCode.length === 6 ? theme.accent : theme.line }]}
+              onPress={handleJoin} disabled={loading || inputCode.length !== 6} activeOpacity={0.85}>
+              <Text style={[ps.bigBtnTitle, { color: inputCode.length === 6 ? theme.onAccent : theme.subText }]}>
+                {loading ? '확인 중…' : '그룹 참여 →'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => { setStep('choose'); setError(''); setInputCode(''); }}>
+              <Text style={{ color: theme.subText, fontSize: 14, fontWeight: '700' }}>← 뒤로</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+};
+const ps = StyleSheet.create({
+  wrap:         { flexGrow: 1, alignItems: 'center', justifyContent: 'center', padding: 28, gap: 20 },
+  subWrap:      { width: '100%', gap: 14, alignItems: 'center' },
+  logoBadge:    { width: 72, height: 72, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
+  brand:        { fontSize: 36, fontWeight: '900', letterSpacing: -0.5 },
+  tagline:      { fontSize: 15, fontWeight: '600', textAlign: 'center', marginBottom: 8 },
+  bigBtn:       { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 20, padding: 24, borderRadius: 24 },
+  bigBtnTitle:  { fontSize: 20, fontWeight: '900' },
+  bigBtnSub:    { fontSize: 13, fontWeight: '600', marginTop: 2 },
+  codeLabel:    { fontSize: 18, fontWeight: '800' },
+  codeHint:     { fontSize: 14, fontWeight: '600' },
+  codeBox:      { borderWidth: 2, borderRadius: 20, padding: 24, alignItems: 'center', width: '100%' },
+  codeDigits:   { fontSize: 48, fontWeight: '900', fontVariant: ['tabular-nums'], letterSpacing: 12 },
+  codeInput:    { width: '100%', borderWidth: 2, borderRadius: 16, padding: 20, fontSize: 36,
+                  fontWeight: '900', textAlign: 'center', letterSpacing: 14, fontVariant: ['tabular-nums'] },
+});
+
+// ============================================================================
+// 💌 FamilyMessageSection — 가족 안부인사 관리
+// ============================================================================
+const FamilyMessageSection = ({ messages, theme, onAdd, onDelete }) => {
+  const [text, setText] = useState('');
+  const [from, setFrom] = useState('');
+
+  const handleAdd = () => {
+    if (!text.trim()) return;
+    onAdd({ text: text.trim(), from: from.trim() || '가족' });
+    setText(''); setFrom('');
+  };
+
+  return (
+    <View>
+      <Text style={[fs.sectionLabel, { color: theme.subText }]}>💌 가족 안부인사 관리</Text>
+      <View style={[fs.card, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+        {messages.length === 0 ? (
+          <View style={cms.emptyWrap}>
+            <Radio color={theme.subText} size={32} strokeWidth={1.5} />
+            <Text style={[cms.emptyText, { color: theme.subText }]}>
+              등록된 안부인사가 없습니다.{'\n'}아래에서 메시지를 추가하세요.
+            </Text>
+          </View>
+        ) : (
+          messages.map((msg, idx) => (
+            <View key={msg.id}
+              style={[fms.msgRow, { borderBottomColor: theme.line, borderBottomWidth: idx < messages.length - 1 ? 1 : 0 }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[fms.msgText, { color: theme.text }]}>"{msg.text}"</Text>
+                <Text style={[fms.msgFrom, { color: theme.accent }]}>— {msg.from}</Text>
+              </View>
+              <TouchableOpacity style={[cms.iconBtn, { backgroundColor: theme.surfaceAlt }]}
+                onPress={() => onDelete(msg.id)} activeOpacity={0.8}>
+                <Trash2 color={theme.rose} size={15} strokeWidth={2.5} />
+              </TouchableOpacity>
+            </View>
+          ))
+        )}
+        {/* 메시지 입력 폼 */}
+        <View style={[fms.inputWrap, { borderTopColor: theme.line, borderTopWidth: messages.length > 0 ? 1 : 0, paddingTop: messages.length > 0 ? 14 : 0 }]}>
+          <TextInput
+            style={[fms.input, { backgroundColor: theme.surfaceAlt, color: theme.text, borderColor: theme.line }]}
+            value={text} onChangeText={setText}
+            placeholder="안부 메시지 입력…" placeholderTextColor={theme.subText}
+            multiline maxLength={60}
+          />
+          <TextInput
+            style={[fms.inputSmall, { backgroundColor: theme.surfaceAlt, color: theme.text, borderColor: theme.line }]}
+            value={from} onChangeText={setFrom}
+            placeholder="보내는 사람 (예: 딸)" placeholderTextColor={theme.subText}
+          />
+          <TouchableOpacity
+            style={[cms.addBtn, { backgroundColor: text.trim() ? theme.accent : theme.line }]}
+            onPress={handleAdd} disabled={!text.trim()} activeOpacity={0.85}>
+            <Plus color={text.trim() ? theme.onAccent : theme.subText} size={18} strokeWidth={3} />
+            <Text style={[cms.addBtnText, { color: text.trim() ? theme.onAccent : theme.subText }]}>메시지 추가</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </View>
+  );
+};
+const fms = StyleSheet.create({
+  msgRow:    { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, gap: 10 },
+  msgText:   { fontSize: 14, fontWeight: '700', lineHeight: 20 },
+  msgFrom:   { fontSize: 12, fontWeight: '800', marginTop: 2 },
+  inputWrap: { gap: 8, marginTop: 4 },
+  input:     { borderWidth: 1.5, borderRadius: 12, padding: 12, fontSize: 14, fontWeight: '600', minHeight: 50 },
+  inputSmall:{ borderWidth: 1.5, borderRadius: 12, padding: 10, fontSize: 13, fontWeight: '600' },
+});
+
+// ============================================================================
+// 📢 RemoteAlertSection — 패밀리 → 시니어 원격 알림
+// ============================================================================
+const QUICK_ALERTS = [
+  { label: '💊 약 드실 시간이에요!', msg: '약 드실 시간이에요!' },
+  { label: '🏠 집에 계세요?',       msg: '집에 계세요?' },
+  { label: '⛪ 예배 시간이에요!',   msg: '예배 시간이에요!' },
+  { label: '📞 전화 받아주세요!',   msg: '전화 받아주세요!' },
+];
+
+const RemoteAlertSection = ({ theme, onSend }) => {
+  const [customMsg, setCustomMsg] = useState('');
+  return (
+    <View>
+      <Text style={[fs.sectionLabel, { color: theme.subText }]}>📢 원격 알림 보내기</Text>
+      <View style={[fs.card, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+          {QUICK_ALERTS.map(a => (
+            <TouchableOpacity key={a.msg}
+              style={[ras.chip, { backgroundColor: theme.accentDim, borderColor: theme.accent }]}
+              onPress={() => onSend(a.msg)} activeOpacity={0.8}>
+              <Text style={[ras.chipText, { color: theme.accent }]}>{a.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <View style={ras.row}>
+          <TextInput
+            style={[ras.input, { backgroundColor: theme.surfaceAlt, color: theme.text, borderColor: theme.line, flex: 1 }]}
+            value={customMsg} onChangeText={setCustomMsg}
+            placeholder="직접 입력…" placeholderTextColor={theme.subText}
+            returnKeyType="send" onSubmitEditing={() => { if (customMsg.trim()) { onSend(customMsg.trim()); setCustomMsg(''); } }}
+          />
+          <TouchableOpacity
+            style={[ras.sendBtn, { backgroundColor: customMsg.trim() ? theme.accent : theme.line }]}
+            onPress={() => { if (customMsg.trim()) { onSend(customMsg.trim()); setCustomMsg(''); } }}
+            disabled={!customMsg.trim()} activeOpacity={0.85}>
+            <Send color={customMsg.trim() ? theme.onAccent : theme.subText} size={18} strokeWidth={2.5} />
+          </TouchableOpacity>
+        </View>
+      </View>
+    </View>
+  );
+};
+const ras = StyleSheet.create({
+  chip:     { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderWidth: 1.5 },
+  chipText: { fontSize: 13, fontWeight: '700' },
+  row:      { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  input:    { borderWidth: 1.5, borderRadius: 12, padding: 12, fontSize: 14, fontWeight: '600' },
+  sendBtn:  { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
 });
 
 // ============================================================================
@@ -1427,6 +1842,9 @@ export default function App() {
   const [logs, setLogs]                     = useState([]);
   const [now, setNow]                       = useState(new Date());
 
+  // 가족 그룹 연결
+  const [householdId, setHouseholdId]       = useState(null);
+
   // NFC
   const [nfcSupported, setNfcSupported]     = useState(false);
   const [tags, setTags]                     = useState([]);
@@ -1439,9 +1857,12 @@ export default function App() {
 
   // 커스텀 루틴
   const [routines, setRoutines]             = useState([]);
+  // 가족 안부인사
+  const [familyMessages, setFamilyMessages] = useState([]);
   const [showRoutineModal, setShowRoutineModal] = useState(false);
   const [editingRoutine, setEditingRoutine] = useState(null);
-  const [routineAlert, setRoutineAlert]     = useState(null); // 시니어 화면 알림 메시지
+  const [routineAlert, setRoutineAlert]     = useState(null); // 시니어 화면 알림 메시지 (자동 소멸)
+  const [persistentAlerts, setPersistentAlerts] = useState([]); // 패밀리 원격 알림 목록 (수동 닫기)
 
   // 모달
   const [showTagModal, setShowTagModal]         = useState(false);
@@ -1457,10 +1878,12 @@ export default function App() {
   const handlersRef      = useRef({});
   const enteredZonesRef  = useRef(new Set()); // 이미 트리거된 zone ID (중복 방지)
   const executeRoutineRef = useRef(null);
+  const modeRef          = useRef('selection');
 
   useEffect(() => { tagsRef.current = tags; }, [tags]);
   useEffect(() => { gpsLocationsRef.current = gpsLocations; }, [gpsLocations]);
   useEffect(() => { routinesRef.current = routines; }, [routines]);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
 
   // ── 시계 ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1474,6 +1897,15 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  // ── 하드웨어 뒤로가기 → family/senior 모드에서 앱 종료 방지 ────────────
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (mode === 'family' || mode === 'senior') return true;
+      return false;
+    });
+    return () => sub.remove();
+  }, [mode]);
+
   // ── 로그 ─────────────────────────────────────────────────────────────────
   const pushLog = useCallback((text, type = 'info') => {
     setLogs(prev => [{ id: `${Date.now()}-${Math.random()}`, time: logStamp(), text, type }, ...prev].slice(0, 8));
@@ -1482,8 +1914,15 @@ export default function App() {
   // ── 센서 핸들러 ───────────────────────────────────────────────────────────
   const handleWorship   = useCallback(() => { setContext('worship'); setSafeZoneAlert(false); pushLog('📍 예배당 진입 감지 → 자동 음소거/방해금지 모드 전환', 'info'); }, [pushLog]);
   const handleSafeZone  = useCallback(() => { setSafeZoneAlert(true); pushLog(`🚨 Safe Zone(반경 ${radius}m) 이탈 감지 — 위치 공유 시작`, 'danger'); }, [pushLog, radius]);
-  const handleNFC       = useCallback(() => { setMedicationDone(true); pushLog('💊 NFC 약통 스티커 태그 — 약 복용 완료 확인', 'info'); }, [pushLog]);
+  const handleNFC       = useCallback(() => {
+    setMedicationDone(true);
+    AsyncStorage.setItem(MEDICATION_DATE_KEY, new Date().toDateString()).catch(() => {});
+    pushLog('💊 NFC 약통 스티커 태그 — 약 복용 완료 확인', 'info');
+  }, [pushLog]);
   const handleRollback  = useCallback(() => { setContext('normal'); setSafeZoneAlert(false); pushLog('↩️ 시니어가 원래 화면으로 복귀 (Rollback)', 'warn'); }, [pushLog]);
+  const handleDismissAlert = useCallback((id) => {
+    setPersistentAlerts(prev => prev.filter(a => a.id !== id));
+  }, []);
   const handleChangeMeal = useCallback((key, timeMins) => {
     setMeals(prev => prev.map(m => m.key === key ? { ...m, timeMins } : m));
   }, []);
@@ -1510,6 +1949,7 @@ export default function App() {
           break;
         case 'medication':
           setMedicationDone(true);
+          AsyncStorage.setItem(MEDICATION_DATE_KEY, new Date().toDateString()).catch(() => {});
           handlersRef.current.pushLog(`💊 [${routine.name}] 복약 완료 처리`, 'info');
           break;
         default: break;
@@ -1520,11 +1960,16 @@ export default function App() {
   // executeRoutineRef에 최신 함수 유지 (stale closure 방지)
   useEffect(() => { executeRoutineRef.current = executeRoutine; }, [executeRoutine]);
 
-  // ── 시간 기반 루틴 체커 ───────────────────────────────────────────────────
+  // ── 시간 기반 루틴 체커 (시니어 모드에서만 실행) ──────────────────────────
   useEffect(() => {
+    let lastFiredMinute = -1;
     const interval = setInterval(() => {
+      if (modeRef.current !== 'senior') return;
       const d = new Date();
       if (d.getSeconds() !== 0) return;
+      const minuteKey = d.getHours() * 60 + d.getMinutes();
+      if (minuteKey === lastFiredMinute) return; // 같은 분에 두 번 실행 방지
+      lastFiredMinute = minuteKey;
       const h = d.getHours(), m = d.getMinutes();
       routinesRef.current
         .filter(r => r.enabled && r.trigger.type === 'time' && r.trigger.hour === h && r.trigger.minute === m)
@@ -1538,7 +1983,114 @@ export default function App() {
     AsyncStorage.getItem(NFC_STORAGE_KEY).then(raw => { if (raw) setTags(JSON.parse(raw)); }).catch(() => {});
     AsyncStorage.getItem(GPS_STORAGE_KEY).then(raw => { if (raw) setGpsLocations(JSON.parse(raw)); }).catch(() => {});
     AsyncStorage.getItem(ROUTINE_STORAGE_KEY).then(raw => { if (raw) setRoutines(JSON.parse(raw)); }).catch(() => {});
+    AsyncStorage.getItem(MESSAGES_STORAGE_KEY).then(raw => { if (raw) setFamilyMessages(JSON.parse(raw)); }).catch(() => {});
+    AsyncStorage.getItem(HOUSEHOLD_KEY).then(id => { if (id) setHouseholdId(id); }).catch(() => {});
+    // 복약 상태 일별 리셋: 오늘 날짜가 저장된 날짜와 다르면 리셋
+    const today = new Date().toDateString();
+    AsyncStorage.getItem(MEDICATION_DATE_KEY).then(saved => {
+      if (saved !== today) {
+        setMedicationDone(false);
+        AsyncStorage.setItem(MEDICATION_DATE_KEY, today).catch(() => {});
+      }
+    }).catch(() => {});
   }, []);
+
+  // ── Firebase: 패밀리 → config 업로드 ─────────────────────────────────────
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/config/tags`), tags).catch(() => {});
+  }, [tags, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/config/gpsLocations`), gpsLocations).catch(() => {});
+  }, [gpsLocations, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/config/routines`), routines).catch(() => {});
+  }, [routines, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/config/messages`), familyMessages).catch(() => {});
+  }, [familyMessages, mode, householdId]);
+
+  // ── Firebase: 시니어 → config 구독 (패밀리가 설정한 내용 수신) ─────────────
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    const tagsR    = dbRef(db, `households/${householdId}/config/tags`);
+    const gpsR     = dbRef(db, `households/${householdId}/config/gpsLocations`);
+    const routineR = dbRef(db, `households/${householdId}/config/routines`);
+    const toArr = v => v ? (Array.isArray(v) ? v : Object.values(v)) : [];
+    onValue(tagsR,    snap => { const v = snap.val(); if (v) setTags(toArr(v)); });
+    onValue(gpsR,     snap => { const v = snap.val(); if (v) setGpsLocations(toArr(v)); });
+    const msgR     = dbRef(db, `households/${householdId}/config/messages`);
+    onValue(routineR, snap => { const v = snap.val(); if (v) setRoutines(toArr(v)); });
+    onValue(msgR,     snap => { const v = snap.val(); if (v) setFamilyMessages(toArr(v)); });
+    return () => { off(tagsR); off(gpsR); off(routineR); off(msgR); };
+  }, [mode, householdId]);
+
+  // ── Firebase: 시니어 → status 업로드 ─────────────────────────────────────
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/status/medicationDone`), medicationDone).catch(() => {});
+  }, [medicationDone, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/status/context`), context).catch(() => {});
+  }, [context, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/status/safeZoneAlert`), safeZoneAlert).catch(() => {});
+  }, [safeZoneAlert, mode, householdId]);
+
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    set(dbRef(db, `households/${householdId}/status/logs`), logs).catch(() => {});
+  }, [logs, mode, householdId]);
+
+  // ── Firebase: 패밀리 → status 구독 (시니어 실시간 모니터링) ──────────────
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    const statusR = dbRef(db, `households/${householdId}/status`);
+    onValue(statusR, snap => {
+      const d = snap.val();
+      if (!d) return;
+      if (d.medicationDone !== undefined) setMedicationDone(d.medicationDone);
+      if (d.context)                      setContext(d.context);
+      if (d.safeZoneAlert !== undefined)  setSafeZoneAlert(d.safeZoneAlert);
+      if (d.logs) setLogs(Array.isArray(d.logs) ? d.logs : Object.values(d.logs));
+    });
+    return () => off(statusR);
+  }, [mode, householdId]);
+
+  // ── Firebase: 패밀리 → 시니어 원격 알림 전송 ─────────────────────────────
+  const sendRemoteAlert = useCallback(async (message) => {
+    if (!householdId) return;
+    set(dbRef(db, `households/${householdId}/commands/latestAlert`), {
+      message, sentAt: Date.now(),
+    }).catch(() => {});
+    pushLog(`📢 원격 알림 전송: "${message}"`, 'info');
+  }, [householdId, pushLog]);
+
+  // ── Firebase: 시니어 → 패밀리 알림 수신 ────────────────────────────────
+  const lastAlertTsRef = useRef(0);
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    // 구독 시작 시점 이전의 알림은 무시 (앱 재실행 시 오래된 알림 재생 방지)
+    lastAlertTsRef.current = Date.now();
+    const alertR = dbRef(db, `households/${householdId}/commands/latestAlert`);
+    onValue(alertR, snap => {
+      const d = snap.val();
+      if (!d || d.sentAt <= lastAlertTsRef.current) return;
+      lastAlertTsRef.current = d.sentAt;
+      setPersistentAlerts(prev => [...prev, { id: d.sentAt, message: d.message }]);
+    });
+    return () => off(alertR);
+  }, [mode, householdId]);
 
   // ── NFC 초기화 ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1595,10 +2147,13 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // ── GPS 장소 진입 체크 ────────────────────────────────────────────────────
+  // ── GPS 장소 진입/이탈 체크 ──────────────────────────────────────────────
   const checkGpsZones = useCallback((coords) => {
+    const locs = gpsLocationsRef.current;
+    const beforeCount = enteredZonesRef.current.size; // 이탈 감지용
     let currentZoneName = null;
-    gpsLocationsRef.current.forEach(loc => {
+
+    locs.forEach(loc => {
       const dist = getDistance(coords.latitude, coords.longitude, loc.lat, loc.lng);
       if (dist <= loc.radius) {
         currentZoneName = loc.name;
@@ -1609,7 +2164,6 @@ export default function App() {
             case 'home':    handlersRef.current.pushLog(`🏠 GPS 귀가 확인: ${loc.name}`, 'info'); break;
             default:        handlersRef.current.pushLog(`📍 GPS 장소 진입: ${loc.name}`, 'info');
           }
-          // 커스텀 루틴 실행 (해당 장소에 연결된 루틴)
           routinesRef.current
             .filter(r => r.enabled && r.trigger.type === 'gps' && r.trigger.locationId === loc.id)
             .forEach(r => executeRoutineRef.current?.(r));
@@ -1618,19 +2172,30 @@ export default function App() {
         enteredZonesRef.current.delete(loc.id);
       }
     });
+
+    // Safe Zone 이탈: 장소가 등록되어 있고, 이전에 어딘가 있었는데 지금 아무 곳에도 없음
+    if (locs.length > 0 && beforeCount > 0 && enteredZonesRef.current.size === 0) {
+      handlersRef.current.handleSafeZone();
+    }
+
     setActiveGpsZone(currentZoneName);
   }, []);
 
   // ── GPS 모니터링 (시니어 모드에서만) ──────────────────────────────────────
   useEffect(() => {
     if (mode !== 'senior' || !locationPermission) return;
-    let sub = null;
+    // cancelled 플래그로 cleanup 경쟁 상태 방지
+    const state = { sub: null, cancelled: false };
     Location.watchPositionAsync(
       { accuracy: Location.Accuracy.Balanced, distanceInterval: 15, timeInterval: 10000 },
       loc => checkGpsZones(loc.coords)
-    ).then(s => { sub = s; }).catch(() => {});
+    ).then(s => {
+      if (state.cancelled) { s.remove(); } // cleanup이 먼저 실행된 경우 즉시 해제
+      else { state.sub = s; }
+    }).catch(() => {});
     return () => {
-      sub?.remove();
+      state.cancelled = true;
+      state.sub?.remove();
       setActiveGpsZone(null);
       enteredZonesRef.current.clear();
     };
@@ -1640,7 +2205,7 @@ export default function App() {
   const handleSaveTag = useCallback((tagData) => {
     setTags(prev => {
       const idx = prev.findIndex(t => t.id === tagData.id);
-      const next = idx >= 0 ? prev.map((t, i) => i === idx ? tagData : t) : [...prev, { ...tagData, createdAt: Date.now() }];
+      const next = idx >= 0 ? prev.map((t, i) => i === idx ? { ...t, ...tagData } : t) : [...prev, { ...tagData, createdAt: Date.now() }];
       AsyncStorage.setItem(NFC_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
       return next;
     });
@@ -1667,7 +2232,7 @@ export default function App() {
     setGpsLocations(prev => {
       const idx = prev.findIndex(l => l.id === locData.id);
       const next = idx >= 0
-        ? prev.map((l, i) => i === idx ? locData : l)
+        ? prev.map((l, i) => i === idx ? { ...l, ...locData } : l) // 기존 createdAt 등 보존
         : [...prev, { ...locData, id: `gps-${Date.now()}`, createdAt: Date.now() }];
       AsyncStorage.setItem(GPS_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
       return next;
@@ -1687,12 +2252,28 @@ export default function App() {
   const openEditGps   = useCallback((loc) => { setEditingLocation(loc); setShowLocationModal(true); }, []);
   const closeLocModal = useCallback(() => { setShowLocationModal(false); setEditingLocation(null); }, []);
 
+  // ── 그룹 연결 해제 ────────────────────────────────────────────────────────
+  const handleDisconnect = useCallback(() => {
+    Alert.alert(
+      '가족 그룹 연결 해제',
+      '연결을 해제하면 동기화가 중단됩니다.\n다시 연결하려면 코드를 다시 입력해야 합니다.',
+      [
+        { text: '취소', style: 'cancel' },
+        { text: '해제', style: 'destructive', onPress: async () => {
+          await AsyncStorage.removeItem(HOUSEHOLD_KEY).catch(() => {});
+          setHouseholdId(null);
+          setMode('selection');
+        }},
+      ]
+    );
+  }, []);
+
   // ── 커스텀 루틴 CRUD ──────────────────────────────────────────────────────
   const handleSaveRoutine = useCallback((routineData) => {
     setRoutines(prev => {
       const idx = prev.findIndex(r => r.id === routineData.id);
       const next = idx >= 0
-        ? prev.map((r, i) => i === idx ? routineData : r)
+        ? prev.map((r, i) => i === idx ? { ...r, ...routineData } : r) // 기존 createdAt 등 보존
         : [...prev, { ...routineData, id: `routine-${Date.now()}`, createdAt: Date.now() }];
       AsyncStorage.setItem(ROUTINE_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
       return next;
@@ -1716,29 +2297,74 @@ export default function App() {
     });
   }, []);
 
+  const handleAddMessage = useCallback(({ text, from }) => {
+    setFamilyMessages(prev => {
+      const next = [...prev, { id: `msg-${Date.now()}`, text, from, createdAt: Date.now() }];
+      AsyncStorage.setItem(MESSAGES_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const handleDeleteMessage = useCallback((msgId) => {
+    setFamilyMessages(prev => {
+      const next = prev.filter(m => m.id !== msgId);
+      AsyncStorage.setItem(MESSAGES_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
+
   const openAddRoutine    = useCallback(() => { setEditingRoutine(null); setShowRoutineModal(true); }, []);
   const openEditRoutine   = useCallback((r) => { setEditingRoutine(r); setShowRoutineModal(true); }, []);
   const closeRoutineModal = useCallback(() => { setShowRoutineModal(false); setEditingRoutine(null); }, []);
 
   const theme = context === 'worship' ? THEMES.worship : THEMES.default;
 
+  // 페어링 안 된 상태면 PairingScreen 먼저 표시
+  if (!householdId) {
+    return <PairingScreen theme={theme} onPaired={setHouseholdId} />;
+  }
+
   return (
     <SafeAreaView style={[app.root, { backgroundColor: theme.bg }]}>
       <StatusBar barStyle="light-content" backgroundColor={theme.bg} />
 
       {mode !== 'selection' && (
-        <View style={[app.segment, { backgroundColor: theme.surface, borderColor: theme.line }]}>
-          {[
-            { key: 'senior', icon: <Smartphone color={mode === 'senior' ? theme.onAccent : theme.subText} size={20} strokeWidth={2.5} />, label: '시니어 모드' },
-            { key: 'family', icon: <Users color={mode === 'family' ? theme.onAccent : theme.subText} size={20} strokeWidth={2.5} />, label: '패밀리 모드' },
-          ].map(seg => (
-            <TouchableOpacity key={seg.key} activeOpacity={0.85}
-              style={[app.segmentBtn, mode === seg.key && { backgroundColor: theme.accent }]}
-              onPress={() => setMode(seg.key)}>
-              {seg.icon}
-              <Text style={[app.segmentText, { color: mode === seg.key ? theme.onAccent : theme.subText }]}>{seg.label}</Text>
+        <View>
+          <View style={[app.segment, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+            {[
+              { key: 'senior', icon: <Smartphone color={mode === 'senior' ? theme.onAccent : theme.subText} size={20} strokeWidth={2.5} />, label: '시니어 모드' },
+              { key: 'family', icon: <Users color={mode === 'family' ? theme.onAccent : theme.subText} size={20} strokeWidth={2.5} />, label: '패밀리 모드' },
+            ].map(seg => (
+              <TouchableOpacity key={seg.key} activeOpacity={0.85}
+                style={[app.segmentBtn, mode === seg.key && { backgroundColor: theme.accent }]}
+                onPress={() => {
+                  if (seg.key === mode) return;
+                  if (mode === 'senior' && seg.key === 'family') {
+                    Alert.alert(
+                      '패밀리 모드 전환',
+                      '보호자 관리 화면으로 이동합니다.',
+                      [
+                        { text: '취소', style: 'cancel' },
+                        { text: '전환', onPress: () => setMode('family') },
+                      ]
+                    );
+                  } else {
+                    setMode(seg.key);
+                  }
+                }}>
+                {seg.icon}
+                <Text style={[app.segmentText, { color: mode === seg.key ? theme.onAccent : theme.subText }]}>{seg.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {/* 그룹 코드 배지 */}
+          <View style={app.householdBadge}>
+            <Text style={[app.householdText, { color: theme.subText }]}>그룹 </Text>
+            <Text style={[app.householdText, { color: theme.accent, fontWeight: '900' }]}>{householdId}</Text>
+            <TouchableOpacity onPress={handleDisconnect} style={{ marginLeft: 8, padding: 2 }} activeOpacity={0.7}>
+              <LogOut color={theme.subText} size={13} strokeWidth={2.5} />
             </TouchableOpacity>
-          ))}
+          </View>
         </View>
       )}
 
@@ -1748,6 +2374,8 @@ export default function App() {
           theme={theme} now={now} meals={meals} medicationDone={medicationDone}
           context={context} safeZoneAlert={safeZoneAlert} nfcSupported={nfcSupported}
           activeGpsZone={activeGpsZone} routineAlert={routineAlert}
+          familyMessages={familyMessages} routines={routines}
+          persistentAlerts={persistentAlerts} onDismissAlert={handleDismissAlert}
           onTriggerWorship={handleWorship} onTriggerSafeZone={handleSafeZone} onRollback={handleRollback}
         />
       )}
@@ -1761,6 +2389,8 @@ export default function App() {
           pendingTags={pendingTags} onRegisterPending={openRegisterPending}
           routines={routines} onAddRoutine={openAddRoutine} onEditRoutine={openEditRoutine}
           onDeleteRoutine={handleDeleteRoutine} onToggleRoutine={handleToggleRoutine}
+          onSendAlert={sendRemoteAlert}
+          familyMessages={familyMessages} onAddMessage={handleAddMessage} onDeleteMessage={handleDeleteMessage}
         />
       )}
 
@@ -1788,7 +2418,9 @@ export default function App() {
 
 const app = StyleSheet.create({
   root: { flex: 1 },
-  segment: { flexDirection: 'row', margin: 16, marginBottom: 8, padding: 5, borderRadius: 18, borderWidth: 1, gap: 4 },
+  segment: { flexDirection: 'row', margin: 16, marginBottom: 4, padding: 5, borderRadius: 18, borderWidth: 1, gap: 4 },
   segmentBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: 14 },
   segmentText: { fontSize: 15, fontWeight: '800' },
+  householdBadge: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginBottom: 4 },
+  householdText: { fontSize: 11, fontWeight: '600', fontVariant: ['tabular-nums'] },
 });
