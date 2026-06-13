@@ -261,6 +261,67 @@ const mps = StyleSheet.create({
 });
 
 // ============================================================================
+// 🗺️ MapPicker — 탭으로 위치를 선택하는 인터랙티브 지도
+// ============================================================================
+const MapPicker = React.forwardRef(({ lat, lng, onPick, theme }, ref) => {
+  const hasInit = lat != null && lng != null;
+  const initLat = hasInit ? lat : 37.5665;
+  const initLng = hasInit ? lng : 126.9780;
+  if (!WebView) {
+    return (
+      <View style={[mpk.wrapper, { alignItems: 'center', justifyContent: 'center', backgroundColor: theme.surfaceAlt }]}>
+        <MapPin color={theme.accent} size={22} strokeWidth={2.5} />
+        <Text style={[mps.fallbackHint, { color: theme.subText }]}>지도 미지원 환경</Text>
+      </View>
+    );
+  }
+  const html = `<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>*{margin:0;padding:0}html,body,#m{width:100%;height:100%;background:#141A18}
+#hint{position:absolute;top:8px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.68);color:#fff;padding:5px 14px;border-radius:12px;font-size:12px;z-index:999;pointer-events:none;white-space:nowrap}</style>
+</head><body>
+<div id="hint">지도를 탭하여 위치 선택 📍</div>
+<div id="m"></div>
+<script>
+try{
+  var hasInit=${hasInit ? 'true' : 'false'};
+  var m=L.map('m',{zoomControl:true,attributionControl:false}).setView([${initLat},${initLng}],hasInit?16:13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(m);
+  var marker=hasInit?L.marker([${initLat},${initLng}]).addTo(m):null;
+  m.on('click',function(e){
+    var lat=e.latlng.lat,lng=e.latlng.lng;
+    if(marker)marker.setLatLng([lat,lng]);else{marker=L.marker([lat,lng]).addTo(m);}
+    document.getElementById('hint').style.display='none';
+    window.ReactNativeWebView.postMessage(JSON.stringify({lat:lat,lng:lng}));
+  });
+}catch(e){}
+</script></body></html>`;
+  return (
+    <View style={mpk.wrapper}>
+      <WebView
+        ref={ref}
+        source={{ html }}
+        style={{ flex: 1 }}
+        javaScriptEnabled
+        domStorageEnabled
+        originWhitelist={['*']}
+        scrollEnabled={false}
+        showsHorizontalScrollIndicator={false}
+        showsVerticalScrollIndicator={false}
+        onMessage={(e) => {
+          try { const d = JSON.parse(e.nativeEvent.data); onPick(d.lat, d.lng); } catch (_) {}
+        }}
+      />
+    </View>
+  );
+});
+const mpk = StyleSheet.create({
+  wrapper: { height: 220, borderRadius: 12, marginBottom: 4, overflow: 'hidden', opacity: 0.99 },
+});
+
+// ============================================================================
 // 🔊 VoiceVisualizer
 // ============================================================================
 const VoiceVisualizer = ({ playing, theme }) => {
@@ -531,6 +592,7 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
   const [fetching, setFetching]   = useState(false);
   const [locError, setLocError]   = useState('');
   const [mapReady, setMapReady]   = useState(false); // Modal 애니메이션 끝난 뒤 WebView 마운트
+  const mapPickerRef = useRef(null);
 
   useEffect(() => {
     if (!visible) { setMapReady(false); return; }
@@ -573,8 +635,17 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
         setFetching(false);
         return;
       }
-      setLocLat(loc.coords.latitude);
-      setLocLng(loc.coords.longitude);
+      const lat = loc.coords.latitude;
+      const lng = loc.coords.longitude;
+      setLocLat(lat);
+      setLocLng(lng);
+      // 이미 마운트된 MapPicker 지도 중심 이동
+      const js = '(function(){try{m.setView([' + lat + ',' + lng + '],16);'
+        + 'if(marker)marker.setLatLng([' + lat + ',' + lng + ']);'
+        + 'else{marker=L.marker([' + lat + ',' + lng + ']).addTo(m);}'
+        + "document.getElementById('hint').style.display='none';"
+        + '}catch(e){}}());true;';
+      mapPickerRef.current?.injectJavaScript(js);
     } catch (e) {
       setLocError('위치 권한을 확인해주세요.');
     } finally { setFetching(false); }
@@ -625,16 +696,21 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
               {locError !== '' && (
                 <Text style={[lm.errorText, { color: theme.rose }]}>{locError}</Text>
               )}
-              {locLat != null && mapReady && (
-                <>
-                  <MapPreview lat={locLat} lng={locLng} theme={theme} />
-                  <View style={[lm.coordBox, { backgroundColor: theme.surfaceAlt }]}>
-                    <MapPin color={theme.accent} size={14} strokeWidth={2.5} />
-                    <Text style={[lm.coordText, { color: theme.subText }]}>
-                      {locLat?.toFixed(5)}° N,  {locLng?.toFixed(5)}° E
-                    </Text>
-                  </View>
-                </>
+              {mapReady && (
+                <MapPicker
+                  ref={mapPickerRef}
+                  lat={locLat} lng={locLng}
+                  onPick={(la, lo) => { setLocLat(la); setLocLng(lo); }}
+                  theme={theme}
+                />
+              )}
+              {locLat != null && (
+                <View style={[lm.coordBox, { backgroundColor: theme.surfaceAlt }]}>
+                  <MapPin color={theme.accent} size={14} strokeWidth={2.5} />
+                  <Text style={[lm.coordText, { color: theme.subText }]}>
+                    {locLat?.toFixed(5)}° N,  {locLng?.toFixed(5)}° E
+                  </Text>
+                </View>
               )}
 
               {/* 감지 반경 */}
@@ -1010,6 +1086,7 @@ const FamilyScreen = ({
   routines, onAddRoutine, onEditRoutine, onDeleteRoutine, onToggleRoutine,
   onSendAlert,
   familyMessages, onAddMessage, onDeleteMessage,
+  seniorLocation,
 }) => {
   const circleScale = 0.35 + ((radius - 100) / 900) * 0.65;
   const mapSize = SCREEN_W - 80;
@@ -1058,6 +1135,19 @@ const FamilyScreen = ({
               <Text style={[fs.logText, { color: theme.text }]} numberOfLines={2}>{log.text}</Text>
             </View>
           ))}
+        {seniorLocation && (
+          <>
+            <View style={[fs.divider, { backgroundColor: theme.line }]} />
+            <View style={[fs.cardHeader, { marginBottom: 8 }]}>
+              <MapPin color={theme.subText} size={16} strokeWidth={2.5} />
+              <Text style={[fs.logHeader, { color: theme.subText }]}>아버지 현재 위치</Text>
+              <Text style={[fs.logTime, { color: theme.subText, marginLeft: 'auto' }]}>
+                {Math.round((Date.now() - seniorLocation.ts) / 60000)}분 전 기준
+              </Text>
+            </View>
+            <MapPreview lat={seniorLocation.lat} lng={seniorLocation.lng} theme={theme} />
+          </>
+        )}
       </View>
 
       {/* ② 식사 루틴 */}
@@ -1867,6 +1957,7 @@ export default function App() {
   const [editingRoutine, setEditingRoutine] = useState(null);
   const [routineAlert, setRoutineAlert]     = useState(null); // 시니어 화면 알림 메시지 (자동 소멸)
   const [persistentAlerts, setPersistentAlerts] = useState([]); // 패밀리 원격 알림 목록 (수동 닫기)
+  const [seniorLocation, setSeniorLocation]     = useState(null); // 시니어 GPS 위치 { lat, lng, ts }
 
   // 모달
   const [showTagModal, setShowTagModal]         = useState(false);
@@ -2012,7 +2103,9 @@ export default function App() {
 
   useEffect(() => {
     if (mode !== 'family' || !householdId) return;
-    set(dbRef(db, `households/${householdId}/config/routines`), routines).catch(() => {});
+    // JSON 직렬화로 undefined 필드 제거 (Firebase는 undefined 거부)
+    const clean = JSON.parse(JSON.stringify(routines));
+    set(dbRef(db, `households/${householdId}/config/routines`), clean).catch(() => {});
   }, [routines, mode, householdId]);
 
   useEffect(() => {
@@ -2056,6 +2149,27 @@ export default function App() {
     set(dbRef(db, `households/${householdId}/status/logs`), logs).catch(() => {});
   }, [logs, mode, householdId]);
 
+  // ── 시니어 GPS 위치 → Firebase 5분 주기 업로드 ───────────────────────────
+  useEffect(() => {
+    if (mode !== 'senior' || !householdId) return;
+    const upload = async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+        let loc = null;
+        try { loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }); }
+        catch (_) { try { loc = await Location.getLastKnownPositionAsync(); } catch (__) {} }
+        if (!loc) return;
+        set(dbRef(db, `households/${householdId}/status/location`), {
+          lat: loc.coords.latitude, lng: loc.coords.longitude, ts: Date.now(),
+        }).catch(() => {});
+      } catch (_) {}
+    };
+    upload();
+    const t = setInterval(upload, 5 * 60 * 1000);
+    return () => clearInterval(t);
+  }, [mode, householdId]);
+
   // ── Firebase: 패밀리 → status 구독 (시니어 실시간 모니터링) ──────────────
   useEffect(() => {
     if (mode !== 'family' || !householdId) return;
@@ -2067,6 +2181,7 @@ export default function App() {
       if (d.context)                      setContext(d.context);
       if (d.safeZoneAlert !== undefined)  setSafeZoneAlert(d.safeZoneAlert);
       if (d.logs) setLogs(Array.isArray(d.logs) ? d.logs : Object.values(d.logs));
+      if (d.location)                     setSeniorLocation(d.location);
     });
     return () => off(statusR);
   }, [mode, householdId]);
@@ -2395,6 +2510,7 @@ export default function App() {
           onDeleteRoutine={handleDeleteRoutine} onToggleRoutine={handleToggleRoutine}
           onSendAlert={sendRemoteAlert}
           familyMessages={familyMessages} onAddMessage={handleAddMessage} onDeleteMessage={handleDeleteMessage}
+          seniorLocation={seniorLocation}
         />
       )}
 
