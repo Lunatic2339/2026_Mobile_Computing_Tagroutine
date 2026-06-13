@@ -257,7 +257,7 @@ const mps = StyleSheet.create({
   fallback: { height: 180, borderRadius: 12, alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 12 },
   fallbackText: { fontSize: 13, fontWeight: '700', fontVariant: ['tabular-nums'] },
   fallbackHint: { fontSize: 11, fontWeight: '600' },
-  wrapper: { height: 180, borderRadius: 12, marginBottom: 12, overflow: 'hidden' },
+  wrapper: { height: 180, borderRadius: 12, marginBottom: 12, overflow: 'hidden', opacity: 0.99 },
 });
 
 // ============================================================================
@@ -530,9 +530,10 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
   const [locLng, setLocLng]       = useState(null);
   const [fetching, setFetching]   = useState(false);
   const [locError, setLocError]   = useState('');
+  const [mapReady, setMapReady]   = useState(false); // Modal 애니메이션 끝난 뒤 WebView 마운트
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible) { setMapReady(false); return; }
     if (editLocation) {
       setLocName(editLocation.name); setLocAction(editLocation.action);
       setLocRadius(editLocation.radius); setLocLat(editLocation.lat);
@@ -541,6 +542,9 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
       setLocName(''); setLocAction('worship'); setLocRadius(100);
       setLocLat(null); setLocLng(null); setLocError('');
     }
+    // Modal slide-in 애니메이션(300ms) 완료 후 WebView 마운트 → EGL 충돌 방지
+    const t = setTimeout(() => setMapReady(true), 350);
+    return () => clearTimeout(t);
   }, [visible]);
 
   const fetchCurrentLocation = async () => {
@@ -588,7 +592,7 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel} hardwareAccelerated>
       <View style={lm.backdrop}>
         <View style={[lm.sheet, { backgroundColor: theme.surface }]}>
           <View style={lm.header}>
@@ -621,13 +625,13 @@ const LocationModal = ({ visible, editLocation, theme, onSave, onCancel }) => {
               {locError !== '' && (
                 <Text style={[lm.errorText, { color: theme.rose }]}>{locError}</Text>
               )}
-              {locLat != null && (
+              {locLat != null && mapReady && (
                 <>
                   <MapPreview lat={locLat} lng={locLng} theme={theme} />
                   <View style={[lm.coordBox, { backgroundColor: theme.surfaceAlt }]}>
                     <MapPin color={theme.accent} size={14} strokeWidth={2.5} />
                     <Text style={[lm.coordText, { color: theme.subText }]}>
-                      {locLat.toFixed(5)}° N,  {locLng.toFixed(5)}° E
+                      {locLat?.toFixed(5)}° N,  {locLng?.toFixed(5)}° E
                     </Text>
                   </View>
                 </>
