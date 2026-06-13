@@ -63,7 +63,7 @@ import {
   Smartphone, Users, Radio, Play, Pause, Pill, MapPin, Footprints,
   Church, AlertTriangle, CheckCircle2, BatteryMedium, Wifi, Home,
   Sun, Moon, UtensilsCrossed, ShieldCheck, Activity,
-  Tag, Plus, Pencil, Trash2, X, Navigation, Send,
+  Tag, Plus, Pencil, Trash2, X, Navigation, Send, LogOut,
 } from 'lucide-react-native';
 import { db } from './firebaseConfig';
 import { ref as dbRef, set, onValue, off } from 'firebase/database';
@@ -1888,11 +1888,12 @@ export default function App() {
     const tagsR    = dbRef(db, `households/${householdId}/config/tags`);
     const gpsR     = dbRef(db, `households/${householdId}/config/gpsLocations`);
     const routineR = dbRef(db, `households/${householdId}/config/routines`);
-    onValue(tagsR,    snap => { const v = snap.val(); if (v) setTags(v); });
-    onValue(gpsR,     snap => { const v = snap.val(); if (v) setGpsLocations(v); });
+    const toArr = v => v ? (Array.isArray(v) ? v : Object.values(v)) : [];
+    onValue(tagsR,    snap => { const v = snap.val(); if (v) setTags(toArr(v)); });
+    onValue(gpsR,     snap => { const v = snap.val(); if (v) setGpsLocations(toArr(v)); });
     const msgR     = dbRef(db, `households/${householdId}/config/messages`);
-    onValue(routineR, snap => { const v = snap.val(); if (v) setRoutines(v); });
-    onValue(msgR,     snap => { const v = snap.val(); if (Array.isArray(v)) setFamilyMessages(v); });
+    onValue(routineR, snap => { const v = snap.val(); if (v) setRoutines(toArr(v)); });
+    onValue(msgR,     snap => { const v = snap.val(); if (v) setFamilyMessages(toArr(v)); });
     return () => { off(tagsR); off(gpsR); off(routineR); off(msgR); };
   }, [mode, householdId]);
 
@@ -1927,7 +1928,7 @@ export default function App() {
       if (d.medicationDone !== undefined) setMedicationDone(d.medicationDone);
       if (d.context)                      setContext(d.context);
       if (d.safeZoneAlert !== undefined)  setSafeZoneAlert(d.safeZoneAlert);
-      if (Array.isArray(d.logs))          setLogs(d.logs);
+      if (d.logs) setLogs(Array.isArray(d.logs) ? d.logs : Object.values(d.logs));
     });
     return () => off(statusR);
   }, [mode, householdId]);
@@ -2103,6 +2104,12 @@ export default function App() {
   const openEditGps   = useCallback((loc) => { setEditingLocation(loc); setShowLocationModal(true); }, []);
   const closeLocModal = useCallback(() => { setShowLocationModal(false); setEditingLocation(null); }, []);
 
+  // ── 그룹 연결 해제 ────────────────────────────────────────────────────────
+  const handleDisconnect = useCallback(async () => {
+    await AsyncStorage.removeItem(HOUSEHOLD_KEY).catch(() => {});
+    setHouseholdId(null);
+  }, []);
+
   // ── 커스텀 루틴 CRUD ──────────────────────────────────────────────────────
   const handleSaveRoutine = useCallback((routineData) => {
     setRoutines(prev => {
@@ -2182,6 +2189,9 @@ export default function App() {
           <View style={app.householdBadge}>
             <Text style={[app.householdText, { color: theme.subText }]}>그룹 </Text>
             <Text style={[app.householdText, { color: theme.accent, fontWeight: '900' }]}>{householdId}</Text>
+            <TouchableOpacity onPress={handleDisconnect} style={{ marginLeft: 8, padding: 2 }} activeOpacity={0.7}>
+              <LogOut color={theme.subText} size={13} strokeWidth={2.5} />
+            </TouchableOpacity>
           </View>
         </View>
       )}
