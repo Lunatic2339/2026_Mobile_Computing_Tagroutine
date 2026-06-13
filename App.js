@@ -48,6 +48,7 @@ try {
   Location = {
     requestForegroundPermissionsAsync: async () => ({ status: 'denied' }),
     getCurrentPositionAsync: async () => ({ coords: { latitude: 37.5665, longitude: 126.9780 } }),
+    getLastKnownPositionAsync: async () => ({ coords: { latitude: 37.5665, longitude: 126.9780 } }),
     watchPositionAsync: async (_opts, _cb) => ({ remove: () => {} }),
     Accuracy: { High: 4, Balanced: 3, Low: 1 },
   };
