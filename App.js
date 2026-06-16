@@ -2241,15 +2241,17 @@ export default function App() {
   }, [familyMessages, mode, householdId]);
 
   // ── Firebase: 시니어 → config 구독 (패밀리가 설정한 내용 수신) ─────────────
+  // config 구독 — 시니어·패밀리 양쪽 모두 실시간으로 받음
+  // (시니어가 등록한 태그/장소가 패밀리에 즉시 반영되고, 패밀리 설정이 시니어에도 즉시 반영)
   useEffect(() => {
-    if (mode !== 'senior' || !householdId) return;
+    if (!householdId || (mode !== 'senior' && mode !== 'family')) return;
     const tagsR    = dbRef(db, `households/${householdId}/config/tags`);
     const gpsR     = dbRef(db, `households/${householdId}/config/gpsLocations`);
     const routineR = dbRef(db, `households/${householdId}/config/routines`);
+    const msgR     = dbRef(db, `households/${householdId}/config/messages`);
     const toArr = v => v ? (Array.isArray(v) ? v : Object.values(v)) : [];
     onValue(tagsR,    snap => { const v = snap.val(); if (v) setTags(toArr(v)); });
     onValue(gpsR,     snap => { const v = snap.val(); if (v) setGpsLocations(toArr(v)); });
-    const msgR     = dbRef(db, `households/${householdId}/config/messages`);
     onValue(routineR, snap => { const v = snap.val(); if (v) setRoutines(toArr(v)); });
     onValue(msgR,     snap => { const v = snap.val(); if (v) setFamilyMessages(toArr(v)); });
     return () => { off(tagsR); off(gpsR); off(routineR); off(msgR); };
