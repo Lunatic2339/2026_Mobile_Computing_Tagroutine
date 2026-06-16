@@ -2114,9 +2114,14 @@ export default function App() {
   // 시니어 모드 NFC 태그 등록 (이름만 입력, 액션은 패밀리가 나중에 설정)
   const handleSeniorRegisterTag = useCallback((id, name) => {
     const newTag = { id, name, action: 'log', createdAt: Date.now() };
-    setTags(prev => [...prev, newTag]);
+    setTags(prev => {
+      const next = [...prev, newTag];
+      AsyncStorage.setItem(NFC_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+      if (householdId) set(dbRef(db, `households/${householdId}/config/tags`), next).catch(() => {});
+      return next;
+    });
     setSeniorTagPrompt(null);
-  }, []);
+  }, [householdId]);
 
   // 시니어 모드 현재 위치 → GPS 장소 저장 (반경·액션은 패밀리가 나중에 설정)
   const handleSeniorSaveLocation = useCallback(async (name) => {
@@ -2132,9 +2137,14 @@ export default function App() {
         action: 'log', radius: 100,
         lat: loc.coords.latitude, lng: loc.coords.longitude,
       };
-      setGpsLocations(prev => [...prev, newLoc]);
+      setGpsLocations(prev => {
+        const next = [...prev, newLoc];
+        AsyncStorage.setItem(GPS_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
+        if (householdId) set(dbRef(db, `households/${householdId}/config/gpsLocations`), next).catch(() => {});
+        return next;
+      });
     } catch (_) {}
-  }, []);
+  }, [householdId]);
   const handleChangeMeal = useCallback((key, timeMins) => {
     setMeals(prev => prev.map(m => m.key === key ? { ...m, timeMins } : m));
   }, []);
