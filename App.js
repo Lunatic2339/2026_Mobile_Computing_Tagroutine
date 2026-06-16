@@ -889,9 +889,15 @@ const SeniorScreen = ({
   familyMessages, routines,
   persistentAlerts, onDismissAlert,
   onTriggerWorship, onTriggerSafeZone, onRollback,
+  seniorTagPrompt, onRegisterTag, onDismissTagPrompt,
+  onSaveLocation,
 }) => {
-  const [playing, setPlaying] = useState(false);
-  const [msgIdx, setMsgIdx]   = useState(0);
+  const [playing, setPlaying]         = useState(false);
+  const [msgIdx, setMsgIdx]           = useState(0);
+  const [gpsNamePrompt, setGpsNamePrompt] = useState(false);
+  const [gpsNameInput, setGpsNameInput]   = useState('');
+  const [tagNameInput, setTagNameInput]   = useState('');
+  const [savingGps, setSavingGps]     = useState(false);
   const nowMins = now.getHours() * 60 + now.getMinutes();
   const nextMeal = meals.find(m => m.timeMins >= nowMins) || meals[0];
 
@@ -1031,10 +1037,84 @@ const SeniorScreen = ({
         </View>
       )}
 
+      {/* 현재 위치 저장 버튼 */}
+      <TouchableOpacity
+        style={[ss.saveLocBtn, { backgroundColor: theme.surface, borderColor: theme.line }]}
+        activeOpacity={0.85}
+        onPress={() => { setGpsNameInput(''); setGpsNamePrompt(true); }}>
+        <MapPin color={theme.accent} size={28} strokeWidth={2.5} />
+        <Text style={[ss.saveLocText, { color: theme.text }]}>현재 위치를 장소로 저장</Text>
+      </TouchableOpacity>
+
       <TouchableOpacity activeOpacity={0.85} style={[ss.rollbackBtn, { backgroundColor: theme.amber }]} onPress={onRollback}>
         <Home color="#1A1304" size={36} strokeWidth={3} />
         <Text style={ss.rollbackText}>⚠️ 원래 화면으로 되돌리기</Text>
       </TouchableOpacity>
+
+      {/* NFC 태그 등록 오버레이 */}
+      <Modal visible={!!seniorTagPrompt} transparent animationType="fade" onRequestClose={onDismissTagPrompt}>
+        <View style={ss.overlayBack}>
+          <View style={[ss.overlayCard, { backgroundColor: theme.surface }]}>
+            <Text style={ss.overlayIcon}>🏷️</Text>
+            <Text style={[ss.overlayTitle, { color: theme.text }]}>새 NFC 태그 발견!</Text>
+            <Text style={[ss.overlaySub, { color: theme.subText }]}>이름을 입력하면 등록됩니다</Text>
+            <TextInput
+              style={[ss.overlayInput, { backgroundColor: theme.surfaceAlt, color: theme.text, borderColor: theme.line }]}
+              value={tagNameInput}
+              onChangeText={setTagNameInput}
+              placeholder="예: 약통, 현관문"
+              placeholderTextColor={theme.subText}
+              autoFocus
+            />
+            <TouchableOpacity
+              style={[ss.overlayConfirm, { backgroundColor: tagNameInput.trim() ? theme.accent : theme.line }]}
+              onPress={() => { if (tagNameInput.trim()) { onRegisterTag(seniorTagPrompt?.id, tagNameInput.trim()); setTagNameInput(''); } }}
+              disabled={!tagNameInput.trim()} activeOpacity={0.85}>
+              <Text style={[ss.overlayConfirmText, { color: tagNameInput.trim() ? theme.onAccent : theme.subText }]}>등록하기</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => { onDismissTagPrompt(); setTagNameInput(''); }} activeOpacity={0.7}>
+              <Text style={[ss.overlaySkip, { color: theme.subText }]}>건너뛰기</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* GPS 장소 이름 입력 오버레이 */}
+      <Modal visible={gpsNamePrompt} transparent animationType="fade" onRequestClose={() => setGpsNamePrompt(false)}>
+        <View style={ss.overlayBack}>
+          <View style={[ss.overlayCard, { backgroundColor: theme.surface }]}>
+            <Text style={ss.overlayIcon}>📍</Text>
+            <Text style={[ss.overlayTitle, { color: theme.text }]}>현재 위치 저장</Text>
+            <Text style={[ss.overlaySub, { color: theme.subText }]}>이 장소의 이름을 입력하세요</Text>
+            <TextInput
+              style={[ss.overlayInput, { backgroundColor: theme.surfaceAlt, color: theme.text, borderColor: theme.line }]}
+              value={gpsNameInput}
+              onChangeText={setGpsNameInput}
+              placeholder="예: 우리교회, 약국"
+              placeholderTextColor={theme.subText}
+              autoFocus
+            />
+            <TouchableOpacity
+              style={[ss.overlayConfirm, { backgroundColor: gpsNameInput.trim() && !savingGps ? theme.accent : theme.line }]}
+              onPress={async () => {
+                if (!gpsNameInput.trim() || savingGps) return;
+                setSavingGps(true);
+                await onSaveLocation(gpsNameInput.trim());
+                setSavingGps(false);
+                setGpsNamePrompt(false);
+                setGpsNameInput('');
+              }}
+              disabled={!gpsNameInput.trim() || savingGps} activeOpacity={0.85}>
+              <Text style={[ss.overlayConfirmText, { color: gpsNameInput.trim() && !savingGps ? theme.onAccent : theme.subText }]}>
+                {savingGps ? '위치 저장 중…' : '저장하기'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setGpsNamePrompt(false)} activeOpacity={0.7}>
+              <Text style={[ss.overlaySkip, { color: theme.subText }]}>취소</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 };
@@ -1072,6 +1152,17 @@ const ss = StyleSheet.create({
   persistFrom: { fontSize: 18, fontWeight: '800', color: '#1A1304' },
   persistMsg: { fontSize: 24, fontWeight: '700', color: '#1A1304', marginTop: 2, lineHeight: 30 },
   persistDismiss: { fontSize: 16, fontWeight: '900', color: '#1A1304', opacity: 0.6 },
+  saveLocBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, paddingVertical: 20, borderRadius: 22, borderWidth: 1.5, marginBottom: 16 },
+  saveLocText: { fontSize: 22, fontWeight: '800' },
+  overlayBack: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  overlayCard: { width: '100%', borderRadius: 28, padding: 28, alignItems: 'center', gap: 12 },
+  overlayIcon: { fontSize: 52 },
+  overlayTitle: { fontSize: 32, fontWeight: '900', textAlign: 'center' },
+  overlaySub: { fontSize: 20, fontWeight: '600', textAlign: 'center' },
+  overlayInput: { width: '100%', borderWidth: 1.5, borderRadius: 16, paddingHorizontal: 18, paddingVertical: 16, fontSize: 26, fontWeight: '700', marginTop: 8 },
+  overlayConfirm: { width: '100%', paddingVertical: 18, borderRadius: 18, alignItems: 'center', marginTop: 4 },
+  overlayConfirmText: { fontSize: 26, fontWeight: '900' },
+  overlaySkip: { fontSize: 18, fontWeight: '700', marginTop: 8, padding: 8 },
 });
 
 // ============================================================================
@@ -1958,6 +2049,7 @@ export default function App() {
   const [routineAlert, setRoutineAlert]     = useState(null); // 시니어 화면 알림 메시지 (자동 소멸)
   const [persistentAlerts, setPersistentAlerts] = useState([]); // 패밀리 원격 알림 목록 (수동 닫기)
   const [seniorLocation, setSeniorLocation]     = useState(null); // 시니어 GPS 위치 { lat, lng, ts }
+  const [seniorTagPrompt, setSeniorTagPrompt]   = useState(null); // 시니어 모드 미등록 태그 { id } | null
 
   // 모달
   const [showTagModal, setShowTagModal]         = useState(false);
@@ -2017,6 +2109,31 @@ export default function App() {
   const handleRollback  = useCallback(() => { setContext('normal'); setSafeZoneAlert(false); pushLog('↩️ 시니어가 원래 화면으로 복귀 (Rollback)', 'warn'); }, [pushLog]);
   const handleDismissAlert = useCallback((id) => {
     setPersistentAlerts(prev => prev.filter(a => a.id !== id));
+  }, []);
+
+  // 시니어 모드 NFC 태그 등록 (이름만 입력, 액션은 패밀리가 나중에 설정)
+  const handleSeniorRegisterTag = useCallback((id, name) => {
+    const newTag = { id, name, action: 'log', createdAt: Date.now() };
+    setTags(prev => [...prev, newTag]);
+    setSeniorTagPrompt(null);
+  }, []);
+
+  // 시니어 모드 현재 위치 → GPS 장소 저장 (반경·액션은 패밀리가 나중에 설정)
+  const handleSeniorSaveLocation = useCallback(async (name) => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+      let loc = null;
+      try { loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }); }
+      catch (_) { try { loc = await Location.getLastKnownPositionAsync(); } catch (__) {} }
+      if (!loc) return;
+      const newLoc = {
+        id: Date.now().toString(), name,
+        action: 'log', radius: 100,
+        lat: loc.coords.latitude, lng: loc.coords.longitude,
+      };
+      setGpsLocations(prev => [...prev, newLoc]);
+    } catch (_) {}
   }, []);
   const handleChangeMeal = useCallback((key, timeMins) => {
     setMeals(prev => prev.map(m => m.key === key ? { ...m, timeMins } : m));
@@ -2225,8 +2342,13 @@ export default function App() {
           const id = normalizeTagId(tag?.id);
           const matched = tagsRef.current.find(t => t.id === id);
           if (!matched) {
-            handlersRef.current.pushLog(`🏷️ 미등록 NFC 태그 감지 (${id.slice(0, 8) || '?'}…)`, 'warn');
-            setPendingTags(prev => prev.some(t => t.id === id) ? prev : [...prev, { id, detectedAt: Date.now() }]);
+            if (modeRef.current === 'senior') {
+              // 시니어 모드: 즉시 이름 입력 프롬프트 표시
+              setSeniorTagPrompt({ id });
+            } else {
+              handlersRef.current.pushLog(`🏷️ 미등록 NFC 태그 감지 (${id.slice(0, 8) || '?'}…)`, 'warn');
+              setPendingTags(prev => prev.some(t => t.id === id) ? prev : [...prev, { id, detectedAt: Date.now() }]);
+            }
             return;
           }
           switch (matched.action) {
@@ -2496,6 +2618,9 @@ export default function App() {
           familyMessages={familyMessages} routines={routines}
           persistentAlerts={persistentAlerts} onDismissAlert={handleDismissAlert}
           onTriggerWorship={handleWorship} onTriggerSafeZone={handleSafeZone} onRollback={handleRollback}
+          seniorTagPrompt={seniorTagPrompt} onRegisterTag={handleSeniorRegisterTag}
+          onDismissTagPrompt={() => setSeniorTagPrompt(null)}
+          onSaveLocation={handleSeniorSaveLocation}
         />
       )}
       {mode === 'family' && (
