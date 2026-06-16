@@ -2501,7 +2501,24 @@ export default function App() {
       [
         { text: '취소', style: 'cancel' },
         { text: '해제', style: 'destructive', onPress: async () => {
-          await AsyncStorage.removeItem(HOUSEHOLD_KEY).catch(() => {});
+          await Promise.all([
+            AsyncStorage.removeItem(HOUSEHOLD_KEY),
+            AsyncStorage.removeItem(NFC_STORAGE_KEY),
+            AsyncStorage.removeItem(GPS_STORAGE_KEY),
+            AsyncStorage.removeItem(ROUTINE_STORAGE_KEY),
+            AsyncStorage.removeItem(MESSAGES_STORAGE_KEY),
+            AsyncStorage.removeItem(MEDICATION_DATE_KEY),
+          ]).catch(() => {});
+          setTags([]);
+          setGpsLocations([]);
+          setRoutines([]);
+          setFamilyMessages([]);
+          setMedicationDone(false);
+          setContext('normal');
+          setSafeZoneAlert(false);
+          setLogs([]);
+          setSeniorLocation(null);
+          setPersistentAlerts([]);
           setHouseholdId(null);
           setMode('selection');
         }},
@@ -2562,7 +2579,14 @@ export default function App() {
 
   // 페어링 안 된 상태면 PairingScreen 먼저 표시
   if (!householdId) {
-    return <PairingScreen theme={theme} onPaired={setHouseholdId} />;
+    const handlePaired = (id) => {
+      // 새 그룹으로 진입 시 이전 데이터 초기화
+      setTags([]); setGpsLocations([]); setRoutines([]); setFamilyMessages([]);
+      setMedicationDone(false); setContext('normal'); setSafeZoneAlert(false);
+      setLogs([]); setSeniorLocation(null); setPersistentAlerts([]);
+      setHouseholdId(id);
+    };
+    return <PairingScreen theme={theme} onPaired={handlePaired} />;
   }
 
   return (
