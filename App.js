@@ -890,7 +890,7 @@ const SeniorScreen = ({
   persistentAlerts, onDismissAlert,
   onTriggerWorship, onTriggerSafeZone, onRollback,
   seniorTagPrompt, onRegisterTag, onDismissTagPrompt,
-  onSaveLocation,
+  onSaveLocation, onSendReply,
 }) => {
   const [playing, setPlaying]         = useState(false);
   const [msgIdx, setMsgIdx]           = useState(0);
@@ -1006,6 +1006,27 @@ const SeniorScreen = ({
         <Text style={[ss.radioScript, { color: theme.subText }]}>
           {currentMsg ? `"${currentMsg.text}"` : '"아버지, 건강하게 지내세요!"'}
         </Text>
+      </View>
+
+      {/* 가족에게 답장 */}
+      <View style={[ss.replyCard, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+          <Send color={theme.accent} size={26} strokeWidth={2.5} />
+          <Text style={[ss.replyTitle, { color: theme.text }]}>가족에게 답장</Text>
+        </View>
+        {[
+          { label: '👍 괜찮아요', msg: '괜찮아요!' },
+          { label: '🏠 집에 있어요', msg: '집에 있어요!' },
+          { label: '🍚 식사 중이에요', msg: '식사 중이에요!' },
+          { label: '📞 전화해주세요', msg: '전화해주세요!' },
+        ].map(r => (
+          <TouchableOpacity
+            key={r.msg}
+            style={[ss.replyBtn, { backgroundColor: theme.accentDim, borderColor: theme.accent }]}
+            onPress={() => onSendReply(r.msg)} activeOpacity={0.8}>
+            <Text style={[ss.replyBtnText, { color: theme.accent }]}>{r.label}</Text>
+          </TouchableOpacity>
+        ))}
       </View>
 
       {/* 등록된 루틴 전체 */}
@@ -1152,6 +1173,10 @@ const ss = StyleSheet.create({
   persistFrom: { fontSize: 18, fontWeight: '800', color: '#1A1304' },
   persistMsg: { fontSize: 24, fontWeight: '700', color: '#1A1304', marginTop: 2, lineHeight: 30 },
   persistDismiss: { fontSize: 16, fontWeight: '900', color: '#1A1304', opacity: 0.6 },
+  replyCard: { borderRadius: 24, borderWidth: 1.5, padding: 20, gap: 10, marginBottom: 16 },
+  replyTitle: { fontSize: 24, fontWeight: '900' },
+  replyBtn: { paddingVertical: 18, borderRadius: 18, borderWidth: 1.5, alignItems: 'center' },
+  replyBtnText: { fontSize: 26, fontWeight: '800' },
   saveLocBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, paddingVertical: 20, borderRadius: 22, borderWidth: 1.5, marginBottom: 16 },
   saveLocText: { fontSize: 22, fontWeight: '800' },
   overlayBack: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center', padding: 24 },
@@ -1177,7 +1202,7 @@ const FamilyScreen = ({
   routines, onAddRoutine, onEditRoutine, onDeleteRoutine, onToggleRoutine,
   onSendAlert,
   familyMessages, onAddMessage, onDeleteMessage,
-  seniorLocation,
+  seniorLocation, seniorReplies, onDismissReply,
 }) => {
   const circleScale = 0.35 + ((radius - 100) / 900) * 0.65;
   const mapSize = SCREEN_W - 80;
@@ -1185,6 +1210,21 @@ const FamilyScreen = ({
 
   return (
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+      {/* 시니어 답장 배너 */}
+      {(seniorReplies || []).map(r => (
+        <TouchableOpacity
+          key={r.id}
+          style={[fs.replyBanner, { backgroundColor: theme.accent }]}
+          onPress={() => onDismissReply(r.id)} activeOpacity={0.85}>
+          <Text style={fs.replyIcon}>💬</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={fs.replyFrom}>아버지 답장</Text>
+            <Text style={fs.replyMsg}>{r.message}</Text>
+          </View>
+          <Text style={fs.replyDismiss}>확인 ✓</Text>
+        </TouchableOpacity>
+      ))}
+
       {/* 미등록 태그 배너 */}
       <PendingTagsBanner pendingTags={pendingTags} theme={theme} onRegister={onRegisterPending} />
 
@@ -1311,6 +1351,11 @@ const FamilyScreen = ({
 };
 
 const fs = StyleSheet.create({
+  replyBanner: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16, borderRadius: 18, marginBottom: 12 },
+  replyIcon: { fontSize: 28 },
+  replyFrom: { fontSize: 13, fontWeight: '800', color: '#fff', opacity: 0.85 },
+  replyMsg: { fontSize: 18, fontWeight: '900', color: '#fff', marginTop: 2 },
+  replyDismiss: { fontSize: 13, fontWeight: '900', color: '#fff', opacity: 0.7 },
   card: { borderRadius: 20, borderWidth: 1, padding: 18, marginBottom: 20 },
   cardHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
   cardTitle: { fontSize: 16, fontWeight: '800', flex: 1 },
@@ -2050,6 +2095,7 @@ export default function App() {
   const [persistentAlerts, setPersistentAlerts] = useState([]); // 패밀리 원격 알림 목록 (수동 닫기)
   const [seniorLocation, setSeniorLocation]     = useState(null); // 시니어 GPS 위치 { lat, lng, ts }
   const [seniorTagPrompt, setSeniorTagPrompt]   = useState(null); // 시니어 모드 미등록 태그 { id } | null
+  const [seniorReplies, setSeniorReplies]       = useState([]); // 패밀리 모드에서 수신한 시니어 답장 목록
 
   // 모달
   const [showTagModal, setShowTagModal]         = useState(false);
@@ -2110,6 +2156,14 @@ export default function App() {
   const handleDismissAlert = useCallback((id) => {
     setPersistentAlerts(prev => prev.filter(a => a.id !== id));
   }, []);
+
+  // 시니어 → 패밀리 답장 전송
+  const handleSendReply = useCallback((message) => {
+    if (!householdId) return;
+    set(dbRef(db, `households/${householdId}/commands/seniorReply`), {
+      message, sentAt: Date.now(),
+    }).catch(() => {});
+  }, [householdId]);
 
   // 시니어 모드 NFC 태그 등록 (이름만 입력, 액션은 패밀리가 나중에 설정)
   const handleSeniorRegisterTag = useCallback((id, name) => {
@@ -2313,6 +2367,21 @@ export default function App() {
       if (d.location)                     setSeniorLocation(d.location);
     });
     return () => off(statusR);
+  }, [mode, householdId]);
+
+  // ── Firebase: 시니어 → 패밀리 답장 수신 ────────────────────────────────
+  const lastReplyTsRef = useRef(0);
+  useEffect(() => {
+    if (mode !== 'family' || !householdId) return;
+    lastReplyTsRef.current = Date.now();
+    const replyR = dbRef(db, `households/${householdId}/commands/seniorReply`);
+    onValue(replyR, snap => {
+      const d = snap.val();
+      if (!d || d.sentAt <= lastReplyTsRef.current) return;
+      lastReplyTsRef.current = d.sentAt;
+      setSeniorReplies(prev => [...prev, { id: d.sentAt, message: d.message }]);
+    });
+    return () => off(replyR);
   }, [mode, householdId]);
 
   // ── Firebase: 패밀리 → 시니어 원격 알림 전송 ─────────────────────────────
@@ -2657,6 +2726,7 @@ export default function App() {
           seniorTagPrompt={seniorTagPrompt} onRegisterTag={handleSeniorRegisterTag}
           onDismissTagPrompt={() => setSeniorTagPrompt(null)}
           onSaveLocation={handleSeniorSaveLocation}
+          onSendReply={handleSendReply}
         />
       )}
       {mode === 'family' && (
@@ -2672,6 +2742,8 @@ export default function App() {
           onSendAlert={sendRemoteAlert}
           familyMessages={familyMessages} onAddMessage={handleAddMessage} onDeleteMessage={handleDeleteMessage}
           seniorLocation={seniorLocation}
+          seniorReplies={seniorReplies}
+          onDismissReply={(id) => setSeniorReplies(prev => prev.filter(r => r.id !== id))}
         />
       )}
 
