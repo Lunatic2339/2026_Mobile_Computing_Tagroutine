@@ -2167,9 +2167,12 @@ export default function App() {
 
   // 시니어 모드 NFC 태그 등록 (이름만 입력, 액션은 패밀리가 나중에 설정)
   const handleSeniorRegisterTag = useCallback((id, name) => {
-    const newTag = { id, name, action: 'log', createdAt: Date.now() };
     setTags(prev => {
-      const next = [...prev, newTag];
+      // 중복 방지: 같은 ID가 이미 있으면 이름만 업데이트, 없으면 추가
+      const exists = prev.some(t => t.id === id);
+      const next = exists
+        ? prev.map(t => t.id === id ? { ...t, name } : t)
+        : [...prev, { id, name, action: 'log', createdAt: Date.now() }];
       AsyncStorage.setItem(NFC_STORAGE_KEY, JSON.stringify(next)).catch(() => {});
       if (householdId) set(dbRef(db, `households/${householdId}/config/tags`), next).catch(() => {});
       return next;
@@ -2424,7 +2427,7 @@ export default function App() {
           const matched = tagsRef.current.find(t => t.id === id);
           if (!matched) {
             if (modeRef.current === 'senior') {
-              // 시니어 모드: 즉시 이름 입력 프롬프트 표시
+              // 시니어 모드: 미등록 태그만 프롬프트 (이미 등록된 태그는 그냥 액션 실행)
               setSeniorTagPrompt({ id });
             } else {
               handlersRef.current.pushLog(`🏷️ 미등록 NFC 태그 감지 (${id.slice(0, 8) || '?'}…)`, 'warn');
